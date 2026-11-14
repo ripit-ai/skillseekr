@@ -1,0 +1,76 @@
+import { lstat, readdir, readFile } from 'node:fs/promises';
+import { join, basename } from 'node:path';
+import { parseFrontmatter } from './frontmatter.js';
+import { contentHash } from './hash.js';
+
+export interface DiscoveredSkill {
+  id: string;
+  name: string;
+  description: string;
+  dir: string;
+  files: string[];
+  contentHash: string;
+  warnings: string[];
+}
+
+const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+/** Finds skills under treeRoot/skillsDir. Never follows symlinks; never throws for bad input. */
+export async function discoverSkills(treeRoot: string, skillsDir: string): Promise<DiscoveredSkill[]> {
+  const norm = skillsDir.replace(/\\/g, '/');
+  // Leading/trailing slashes are stripped (the path stays under treeRoot); drive-letter paths are refused.
+  if (/^[A-Za-z]:/.test(norm)) return [];
+  const parts = norm.split('/').filter((p) => p !== '' && p !== '.');
+  if (parts.includes('..')) return [];
+
+  // Every component from the tree root down must be a real directory (no symlinks).
+  let root = treeRoot;
+  try {
+    if (!(await lstat(root)).isDirectory()) return [];
+    for (const p of parts) {
+      root = join(root, p);
+      if (!(await lstat(root)).isDirectory()) return [];
+    }
+  } catch {
+    return [];
+  }
+
+  const found: DiscoveredSkill[] = [];
+  async function walk(abs: string, rel: string): Promise<void> {
+    const entries = await readdir(abs, { withFileTypes: true });
+    if (rel !== '' && entries.some((e) => e.isFile() && e.name === 'SKILL.md')) {
+      found.push(await build(abs, rel));
+      return; // prune: shallowest wins
+    }
+    for (const e of entries) {
+      if (e.isDirectory()) await walk(join(abs, e.name), rel ? `${rel}/${e.name}` : e.name);
+    }
+  }
+  await walk(root, '');
+  return found.sort((a, b) => byCodeUnit(a.id, b.id));
+}
+
+async function build(dir: string, id: string): Promise<DiscoveredSkill> {
+  const folder = basename(dir);
+  const warnings: string[] = [];
+  const fm = parseFrontmatter(await readFile(join(dir, 'SKILL.md'), 'utf8'));
+  let name = folder;
+  let description = '';
+  if (!fm.ok) {
+    warnings.push('missing frontmatter');
+  } else {
+    const n = fm.data.name;
+    if (typeof n === 'string' && n.trim() !== '') {
+      name = n;
+      if (n !== folder) warnings.push(`name mismatch: frontmatter name "${n}" does not match folder "${folder}"`);
+    } else {
+      warnings.push(`missing name in frontmatter; using folder name "${folder}"`);
+    }
+  }
+  if (fm.ok) {
+    if (typeof fm.data.description === 'string') description = fm.data.description;
+    else warnings.push('missing description in frontmatter');
+  }
+  const { hash, files } = await contentHash(dir);
+  return { id, name, description, dir, files, contentHash: hash, warnings };
+}
