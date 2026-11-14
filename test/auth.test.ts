@@ -92,4 +92,33 @@ describe('authHeaders', () => {
     expect(r.headers).toEqual({});
     expect(calls.n).toBe(0);
   });
+
+  it.each([
+    'http://api.github.com/x',
+    'https://api.github.com:8443/x',
+    'https://api.github.com@evil.example/x',
+    'not a url',
+  ])('gh_cli sends no token to a non-matching origin: %s', async (url) => {
+    const calls = { n: 0 };
+    const r = await authHeaders({ type: 'gh_cli' }, { url, kind: 'github' }, trusted, mk({}, okExec(calls)));
+    expect(r.headers).toEqual({});
+    expect(calls.n).toBe(0);
+  });
+
+  it('gh_cli works against an http githubApi override with the same origin', async () => {
+    const ctx = { ...mk({}, okExec({ n: 0 })), githubApi: 'http://127.0.0.1:9999' };
+    const r = await authHeaders({ type: 'gh_cli' }, { url: 'http://127.0.0.1:9999/x', kind: 'github' }, trusted, ctx);
+    expect(r.headers).toEqual({ Authorization: 'Bearer ghtok' });
+  });
+
+  it('gh_cli with an exec that rejects gives the auth/gh-unavailable warning', async () => {
+    const exec: Exec = async () => { throw new Error('spawn gh ENOENT'); };
+    const r = await authHeaders({ type: 'gh_cli' }, gh, trusted, mk({}, exec));
+    expect(r.headers).toEqual({});
+    expect(r.problem?.code).toBe('auth/gh-unavailable');
+  });
+
+  it('an unknown auth type fails loudly', async () => {
+    await expect(authHeaders({ type: 'weird' } as never, gh, trusted, mk({}))).rejects.toThrow(/unknown auth type/);
+  });
 });

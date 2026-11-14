@@ -30,9 +30,10 @@ export async function authHeaders(
   if (auth.type === 'none') return { headers: {} };
 
   if (auth.type === 'gh_cli') {
-    let host: string | undefined;
-    try { host = new URL(target.url).host; } catch { /* invalid url: no token */ }
-    if (host === undefined || host !== new URL(ctx.githubApi).host) return { headers: {} };
+    // Full origin (scheme + host + port): never send the token in cleartext or to another port.
+    let origin: string | undefined;
+    try { origin = new URL(target.url).origin; } catch { /* unparseable url: no token */ }
+    if (origin === undefined || origin !== new URL(ctx.githubApi).origin) return { headers: {} };
     const token = await loadGhToken(ctx);
     if (!token) {
       return fail('warning', 'auth/gh-unavailable',
@@ -57,7 +58,11 @@ export async function authHeaders(
     if (pass === undefined) return missing(auth.password_env_var);
     return { headers: { Authorization: `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}` } };
   }
-  const value = read(auth.env_var);
-  if (value === undefined) return missing(auth.env_var);
-  return { headers: { Authorization: `Bearer ${value}` } };
+  if (auth.type === 'github_token' || auth.type === 'bearer') {
+    const value = read(auth.env_var);
+    if (value === undefined) return missing(auth.env_var);
+    return { headers: { Authorization: `Bearer ${value}` } };
+  }
+  const unreachable: never = auth;
+  throw new Error(`unknown auth type: ${JSON.stringify(unreachable)}`);
 }
