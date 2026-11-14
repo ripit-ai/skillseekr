@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { CliError, isJson, loadCatalog, printJson, table, type Cli } from '../output.js';
+import { CliError, isJson, loadCatalog, overrodeText, printJson, table, viaText, type Cli } from '../output.js';
 
 export function registerSearch(program: Command, cli: Cli): void {
   program.command('search <query...>').description('search the resolved catalog')
@@ -11,6 +11,9 @@ export function registerSearch(program: Command, cli: Cli): void {
       const hits = catalog.search(words.join(' '), limit);
       if (isJson(cmd)) return printJson(cli.io, hits);
       if (hits.length === 0) return cli.io.out('no matching skills\n');
-      cli.io.out(table(hits.map((h) => [h.id, h.registry, h.description.replace(/\s+/g, ' ')])));
+      cli.io.out(table(hits.map((h) => {
+        const notes = h.overrode.map((o) => ` [${overrodeText(o)}]`).join('');
+        return [h.id, h.registry, viaText(h.via), h.description.replace(/\s+/g, ' ') + notes];
+      })));
     });
 }

@@ -141,7 +141,7 @@ describe('mcp server', () => {
     const l = await s.call('list_installed', { scope: 'project' });
     expect(l.data.installed).toEqual([{
       name: 'alpha', scope: 'project', dir: join(s.project, '.claude', 'skills', 'alpha'),
-      id: 'alpha', registry: 'one', status: 'current',
+      id: 'alpha', registry: 'one', via: ['one'], status: 'current',
     }]);
   });
 
@@ -167,6 +167,16 @@ describe('mcp server', () => {
     const r = await s.call('list_registries');
     expect(r.data.registries.map((x: { name: string }) => x.name)).toEqual(['one', 'two']);
     expect(r.data.registries[0]).toMatchObject({ sha: SHA, skillCount: 2 });
+  });
+
+  it('list_registries reports skill-id overrides as well as registry overrides (AC-6)', async () => {
+    const f = fixture();
+    f.repos['o/two']!.commits[SHA]!['skills/alpha/SKILL.md'] = skill('alpha', 'TWO');
+    const s = await setup(f);
+    const r = await s.call('list_registries');
+    expect(r.data.overrides).toEqual([
+      { kind: 'skill', key: 'alpha', replaced: { registry: 'one', via: ['one'] }, by: { registry: 'two', via: ['two'] } },
+    ]);
   });
 
   it('inaccessible registry is named in problems; others still work (AC-2)', async () => {

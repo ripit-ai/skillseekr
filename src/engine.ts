@@ -13,11 +13,14 @@ import type { CacheSettings, Config, Problem, SourceEntry } from './types.js';
 
 export interface RegistryView {
   name: string; type: SourceEntry['type']; auth: SourceEntry['auth']['type']; via: string[]; description?: string; instructions?: string;
-  ref?: string; sha?: string; cacheAgeSeconds?: number; stale: boolean; skillCount: number; overriddenBy?: string[];
+  ref?: string; sha?: string; cacheAgeSeconds?: number; stale: boolean; skillCount: number;
+  /** The registries this one replaced by name ("last wins"); absent when it replaced none. */
+  overrode?: Array<{ registry: string; via: string[] }>;
 }
 export interface Engine {
   config(): Promise<Config>;
   catalog(opts?: { force?: boolean }): Promise<Catalog>;
+  /** `overrides` holds every override: registry-name ones first, then skill-id ones (same as the catalog's). */
   registries(): Promise<{ registries: RegistryView[]; includes: IncludeInfo[]; overrides: Override[]; problems: Problem[] }>;
 }
 export interface EngineDeps { discover?: typeof discoverSkills }
@@ -131,10 +134,9 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
 
     const views: RegistryView[] = results.map((r) => {
       const e = r.reg.entry;
-      const by = [...new Set(res.overrides
-        .filter((o) => o.replaced.registry === r.reg.name && o.replaced.via.join('\0') === r.reg.via.join('\0')
-          && o.by.via.join('\0') !== r.reg.via.join('\0'))
-        .map((o) => o.by.registry))];
+      const overrode = res.overrides
+        .filter((o) => o.kind === 'registry' && o.by.registry === r.reg.name && o.by.via.join('\0') === r.reg.via.join('\0'))
+        .map((o) => o.replaced);
       return {
         name: r.reg.name, type: e.type, auth: e.auth.type, via: r.reg.via,
         ...(e.description !== undefined ? { description: e.description } : {}),
@@ -143,7 +145,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
         ...(r.sha !== undefined ? { sha: r.sha } : {}),
         ...(r.cacheAgeSeconds !== undefined ? { cacheAgeSeconds: r.cacheAgeSeconds } : {}),
         stale: r.stale, skillCount: r.skills.length,
-        ...(by.length ? { overriddenBy: by } : {}),
+        ...(overrode.length ? { overrode } : {}),
       };
     });
 
@@ -153,7 +155,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
     const doneAt = ctx.now(); // anchored at load completion, not start
     let expiresAt = ttls.length ? doneAt + Math.min(...ttls) * 1000 : Infinity;
     if (!config.exists) expiresAt = doneAt; // setup may create the config at any moment
-    return { catalog, views, includes: res.includes, overrides: res.overrides, problems, expiresAt };
+    return { catalog, views, includes: res.includes, overrides: catalog.overrides, problems, expiresAt };
   }
 
   async function load(force: boolean): Promise<Loaded> {

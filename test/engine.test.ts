@@ -183,10 +183,16 @@ describe('engine', () => {
       ['solo', ['inc', 'solo'], SHA1, false, 1],
     ]);
     expect(r.registries[0]).toMatchObject({ type: 'github', ref: 'main', cacheAgeSeconds: 0 });
-    expect(r.overrides.map((o) => [o.kind, o.key])).toEqual([['registry', 'dup']]);
-    // the replaced registry is dropped by resolve, so no listed registry is "overridden by" anything
-    expect(r.registries.every((v) => v.overriddenBy === undefined)).toBe(true);
-    expect((await engine.catalog()).overrides.some((o) => o.kind === 'skill' && o.key === 'x')).toBe(true);
+    // registry overrides first, then skill overrides (the same list the catalog and doctor use)
+    expect(r.overrides.map((o) => [o.kind, o.key])).toEqual([['registry', 'dup'], ['skill', 'x']]);
+    expect(r.overrides[1]).toEqual({
+      kind: 'skill', key: 'x', replaced: { registry: 'dup', via: ['inc', 'dup'] }, by: { registry: 'solo', via: ['inc', 'solo'] },
+    });
+    expect(r.overrides).toEqual((await engine.catalog()).overrides);
+    // the winning registry lists what it replaced; the replaced one is dropped by resolve
+    expect(r.registries[0]!.overrode).toEqual([{ registry: 'dup', via: ['dup'] }]);
+    expect(r.registries[1]).not.toHaveProperty('overrode');
+    expect(r.registries[0]).not.toHaveProperty('overriddenBy');
   });
 
   it('an unexpected throw during load becomes engine/load-failed with an empty catalog, never a rejection', async () => {

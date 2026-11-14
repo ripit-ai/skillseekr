@@ -44,10 +44,22 @@ describe('cli', () => {
     const s = await setup({ registries: { one: gh('one') } });
     const r = await s.run('search', 'alpha');
     expect(r.code).toBe(0);
-    expect(r.out).toMatch(/^alpha\s+one\s+alpha helps with alpha tasks$/m);
+    expect(r.out).toMatch(/^alpha\s+one\s+one\s+alpha helps with alpha tasks$/m);
     const j = await s.run('--json', 'search', 'alpha');
     const hits = JSON.parse(j.out);
     expect(hits[0]).toMatchObject({ id: 'alpha', registry: 'one', via: ['one'] });
+  });
+
+  it('search rows show via and note what a hit overrode (AC-6, AC-7)', async () => {
+    const s = await setup({ registries: { one: gh('one'), two: gh('two') } });
+    const r = await s.run('search', 'alpha');
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/^alpha\s+two\s+two\s+alpha helps with alpha tasks \[overrides one \(via one\)\]$/m);
+    const inc = await setup({
+      registries: { inc: { type: 'github-registry', owner: 'o', repo: 'reg', ref: 'main' } },
+      repos: { ...repos(), 'o/reg': { refs: { main: SHA }, commits: { [SHA]: { 'registries.jsonc': JSON.stringify({ registries: { one: gh('one') } }) } } } },
+    });
+    expect((await inc.run('search', 'alpha')).out).toMatch(/^alpha\s+one\s+inc → one\s+alpha helps/m);
   });
 
   it('show accepts id or unique name; ambiguous name exits 1 listing candidate ids', async () => {
@@ -111,8 +123,10 @@ describe('cli', () => {
     await s.run('install', 'cat/dup');
     await writeFile(join(s.cwd, '.claude', 'skills', 'dup', 'extra.txt'), 'x');
     const l = await s.run('list');
-    expect(l.out).toMatch(/^alpha\s+project\s+-\s+current\s+one$/m);
-    expect(l.out).toMatch(/^dup\s+project\s+-\s+modified\s+one$/m);
+    expect(l.out).toMatch(/^NAME\s+SCOPE\s+TOOL\s+STATUS\s+REGISTRY\s+VIA$/m);
+    expect(l.out).toMatch(/^alpha\s+project\s+-\s+current\s+one\s+one$/m);
+    expect(l.out).toMatch(/^dup\s+project\s+-\s+modified\s+one\s+one$/m);
+    expect(JSON.parse((await s.run('--json', 'list')).out).installed[0]).toMatchObject({ name: 'alpha', registry: 'one', via: ['one'] });
     const o = await s.run('outdated');
     expect(o.out).toContain('dup');
     expect(o.out).not.toMatch(/^alpha/m);
@@ -188,6 +202,22 @@ describe('cli', () => {
     expect(after).not.toContain('"mine"');
     expect(after).toContain('// keep me');
     expect((await s.run('registries', 'remove', 'mine')).code).toBe(1);
+  });
+
+  it('registries prints registry and skill overrides (AC-6)', async () => {
+    const s = await setup({
+      registries: { one: gh('one'), inc: { type: 'github-registry', owner: 'o', repo: 'reg', ref: 'main' } },
+      repos: { ...repos(), 'o/reg': { refs: { main: SHA }, commits: { [SHA]: { 'registries.jsonc': JSON.stringify({ registries: { one: gh('two') } }) } } } },
+    });
+    const r = await s.run('registries');
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/^one\s+github\s+inc → one\s+2\s+main\s+aaaaaaa\s+overrides one \(via one\)$/m);
+    expect(r.out).toContain('override: registry "one": one (inc → one) replaces one (one)\n');
+    const two = await setup({ registries: { one: gh('one'), two: gh('two') } });
+    const t = await two.run('registries');
+    expect(t.out).toContain('override: skill "alpha": two (two) replaces one (one)\n');
+    const j = JSON.parse((await two.run('--json', 'registries')).out);
+    expect(j.overrides.map((o: { kind: string; key: string }) => `${o.kind}:${o.key}`)).toEqual(['skill:alpha']);
   });
 
   it('registries add creates the config file when missing', async () => {

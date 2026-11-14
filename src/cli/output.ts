@@ -32,6 +32,9 @@ export function table(rows: string[][]): string {
 
 export const viaText = (via: string[]): string => via.join(' → ');
 
+/** "overrides <registry> (via a → b)": what a skill or registry replaced. */
+export const overrodeText = (o: { registry: string; via: string[] }): string => `overrides ${o.registry} (via ${viaText(o.via)})`;
+
 export const errorProblems = (ps: Problem[]): Problem[] => ps.filter((p) => p.level === 'error');
 
 const problemLine = (p: Problem): string => `${p.registry ? `${p.registry}: ` : ''}${p.message.replace(/\s*\n\s*/g, ' ')}`;

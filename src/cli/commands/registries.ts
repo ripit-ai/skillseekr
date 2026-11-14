@@ -4,7 +4,7 @@ import { UnsafeWriteError, writeFileAtomic } from '../../atomicWrite.js';
 import { addRegistry, removeRegistry } from '../../config/edit.js';
 import { parseRegistriesFile } from '../../config/load.js';
 import { configPath } from '../../paths.js';
-import { CliError, blockingError, isJson, printJson, reportProblems, table, viaText, type Cli } from '../output.js';
+import { CliError, blockingError, isJson, overrodeText, printJson, reportProblems, table, viaText, type Cli } from '../output.js';
 
 const TYPES = ['github', 'http', 'github-registry', 'http-registry'] as const;
 const AUTHS = ['none', 'gh_cli', 'github_token', 'bearer'] as const;
@@ -62,14 +62,15 @@ async function readConfigText(file: string, missing: string | undefined): Promis
 }
 
 function printRegistries(cli: Cli, r: Awaited<ReturnType<ReturnType<Cli['engine']>['registries']>>): void {
-      const rows = [['NAME', 'TYPE', 'VIA', 'SKILLS', 'REF', 'SHA', 'NOTES']];
-      for (const v of r.registries) {
-        const notes = [v.stale ? 'stale' : '', v.overriddenBy ? `overridden by ${v.overriddenBy.join(', ')}` : ''].filter(Boolean).join('; ');
-        rows.push([v.name, v.type, viaText(v.via), String(v.skillCount), v.ref ?? '-', v.sha ? v.sha.slice(0, 7) : '-', notes]);
-      }
-      cli.io.out(table(rows));
-      const regOverrides = r.overrides.filter((o) => o.kind === 'registry');
-      for (const o of regOverrides) cli.io.out(`override: ${o.by.registry} (${viaText(o.by.via)}) replaces ${o.replaced.registry} (${viaText(o.replaced.via)})\n`);
+  const rows = [['NAME', 'TYPE', 'VIA', 'SKILLS', 'REF', 'SHA', 'NOTES']];
+  for (const v of r.registries) {
+    const notes = [v.stale ? 'stale' : '', ...(v.overrode ?? []).map((o) => overrodeText(o))].filter(Boolean).join('; ');
+    rows.push([v.name, v.type, viaText(v.via), String(v.skillCount), v.ref ?? '-', v.sha ? v.sha.slice(0, 7) : '-', notes]);
+  }
+  cli.io.out(table(rows));
+  for (const o of r.overrides) {
+    cli.io.out(`override: ${o.kind} ${JSON.stringify(o.key)}: ${o.by.registry} (${viaText(o.by.via)}) replaces ${o.replaced.registry} (${viaText(o.replaced.via)})\n`);
+  }
 }
 
 export function registerRegistries(program: Command, cli: Cli): void {
