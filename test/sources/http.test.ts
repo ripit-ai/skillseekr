@@ -155,6 +155,20 @@ describe('materializeHttpSkill', () => {
     expect(t.fake.calls[0].headers.Authorization).toBeUndefined();
   });
 
+  it('names the unset env var on a no-cache 401 and leaves no temp file in the skill root', async () => {
+    const t = await setup({ [URL1]: { body: BODY, requireAuth: 'Bearer tok' } });
+    const auth: Auth = { type: 'bearer', env_var: 'BEARER_X' };
+    const r = await materializeHttpSkill(entry(auth), opts(), t.cache, t.ctx);
+    expect('error' in r && r.error.code).toBe('source/no-access');
+    expect('error' in r && r.error.message).toContain('BEARER_X');
+    expect('error' in r && r.error.message).toContain(URL1);
+    t.ctx.env.BEARER_X = 'tok';
+    const ok = await materializeHttpSkill(entry(auth), opts(), t.cache, t.ctx);
+    if ('error' in ok) throw new Error(ok.error.message);
+    expect(await readdir(ok.root)).toEqual(['SKILL.md']);
+    expect((await readdir(join(t.cache.dir, 'http', hash(URL1)))).sort()).toEqual(['foo']);
+  });
+
   it('rejects unsafe skill_name values with source/invalid and no I/O', async () => {
     for (const skill_name of ['', '.', '..', 'a/b', 'a\\b', 'a\0b', '../x']) {
       const t = await setup({ [URL1]: { body: BODY } });

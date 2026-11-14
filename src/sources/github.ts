@@ -128,6 +128,11 @@ async function withSha<T>(
     .then((a) => { if (a.problem) problems.push(a.problem); return a.headers; }));
   const get = getter(o, headers, ctx);
 
+  // Surface why auth failed (missing env var, untrusted entry) on an error with no cache to fall back to (R10).
+  const err = (e: Problem): { error: Problem } => ({
+    error: problems.length ? { ...e, message: `${e.message} (auth: ${problems.map((p) => p.message).join('; ')})` } : e,
+  });
+
   const stale = async (prev: RefState | undefined, why: Failure) => {
     const value = prev ? await cached(prev.sha) : undefined;
     if (!prev || value === undefined) return undefined;
@@ -150,11 +155,11 @@ async function withSha<T>(
     } else {
       const ref = o.ref.split('/').map(encodeURIComponent).join('/');
       const res = await get(`${base}/commits/${ref}`, 'application/vnd.github.sha', `resolving ref "${o.ref}"`);
-      if (isFailure(res)) return (await stale(prev, res)) ?? { error: res.error };
+      if (isFailure(res)) return (await stale(prev, res)) ?? err(res.error);
       sha = res.body.toString('utf8').trim();
       if (!FULL_SHA_RE.test(sha)) {
         const bad = fail('source/bad-response', `GitHub repo ${slug(o)}: resolving ref "${o.ref}" did not return a commit sha`);
-        return (await stale(prev, bad)) ?? { error: bad.error };
+        return (await stale(prev, bad)) ?? err(bad.error);
       }
       stateKey = key;
     }
@@ -166,7 +171,7 @@ async function withSha<T>(
     if (isFailure(got)) {
       // Only an older sha can be cached here (this sha's copy was just found missing).
       const older = prev && prev.sha !== sha ? await stale(prev, got) : undefined;
-      return older ?? { error: got.error };
+      return older ?? err(got.error);
     }
     value = got;
   }

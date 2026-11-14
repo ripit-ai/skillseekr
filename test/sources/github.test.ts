@@ -492,3 +492,12 @@ describe('review fixes (R8 stale on any failure, R9 lazy auth and extraction cap
     expect(await readdir(join(cache.dir, 'github', 'acme', 'skills'))).toEqual([]);
   });
 });
+
+describe('auth cause on errors', () => {
+  it('names the unset env var when a no-cache failure follows an auth problem', async () => {
+    const t = await setup({ token: 'secret' });
+    const r = await materializeGithub(src('main', { type: 'bearer', env_var: 'BEARER_X' }), opts(), t.cache, t.ctx);
+    expect('error' in r && r.error.code).toBe('source/no-access');
+    expect('error' in r && r.error.message).toContain('BEARER_X');
+  });
+});

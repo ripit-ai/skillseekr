@@ -36,10 +36,11 @@ function failureFor(url: string, res: HttpResponse): Failure {
 }
 
 /** Atomic: temp file next to the target, then rename. */
-async function writeAtomic(file: string, body: Buffer): Promise<void> {
-  const tmp = `${file}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
+async function writeAtomic(file: string, tmpDir: string, body: Buffer): Promise<void> {
+  const tmp = `${join(tmpDir, '.tmp-')}${process.pid}-${randomBytes(6).toString('hex')}`;
   try {
     await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+    await mkdir(tmpDir, { recursive: true, mode: 0o700 });
     await writeFile(tmp, body, { mode: 0o600 });
     await rename(tmp, file);
   } catch (e) {
@@ -53,7 +54,7 @@ async function writeAtomic(file: string, body: Buffer): Promise<void> {
  * there is a cached copy). Any failure falls back to the cached copy when one exists (R8).
  */
 async function fetchCached(
-  e: { url: string; auth: Auth }, file: string, opts: FetchOpts, cache: CacheSettings, ctx: Ctx,
+  e: { url: string; auth: Auth }, file: string, tmpDir: string, opts: FetchOpts, cache: CacheSettings, ctx: Ctx,
 ): Promise<{ body: Buffer; stale: boolean; problems: Problem[]; cached: boolean } | Failure> {
   const problems: Problem[] = [];
   const key = `http/${sha256(e.url)}`;
@@ -69,7 +70,11 @@ async function fetchCached(
   }
 
   const useStale = (why: Failure) => {
-    if (!prev) return why;
+    if (!prev) {
+      // Surface why auth failed (missing env var, untrusted entry) when there is no cache to fall back to (R10).
+      if (!problems.length) return why;
+      return fail(why.error.code, `${why.error.message} (auth: ${problems.map((p) => p.message).join('; ')})`);
+    }
     problems.push({
       level: 'warning', code: 'source/stale',
       message: `${why.error.message}; using the cached copy of ${e.url}, which may be stale`,
@@ -101,7 +106,7 @@ async function fetchCached(
 
   let cached = true;
   try {
-    await writeAtomic(file, res.body);
+    await writeAtomic(file, tmpDir, res.body);
     const etag = res.headers['etag'];
     await writeState(cache.dir, key, { ...(etag ? { etag } : {}), checkedAt: ctx.now() } satisfies HttpState);
   } catch (err) {
@@ -118,7 +123,7 @@ export async function materializeHttpSkill(
   const bad = invalidSkillName(e.skill_name);
   if (bad) return { error: bad };
   const root = join(cache.dir, 'http', sha256(e.url), e.skill_name);
-  const r = await fetchCached(e, join(root, 'SKILL.md'), opts, cache, ctx);
+  const r = await fetchCached(e, join(root, 'SKILL.md'), dirname(root), opts, cache, ctx);
   if ('error' in r) return r;
   if (!r.cached) return { error: errorProblem('source/cache-error', `cannot write the cache for ${e.url}: ${r.problems.at(-1)?.message ?? 'unknown error'}`) };
   return { root, stale: r.stale, problems: r.problems };
@@ -129,7 +134,7 @@ export async function fetchHttpText(
   opts: FetchOpts, cache: CacheSettings, ctx: Ctx,
 ): Promise<{ text: string; stale: boolean; problems: Problem[] } | { error: Problem }> {
   const file = join(cache.dir, 'http-text', `${sha256(e.url)}.body`);
-  const r = await fetchCached(e, file, opts, cache, ctx);
+  const r = await fetchCached(e, file, dirname(file), opts, cache, ctx);
   if ('error' in r) return r;
   return { text: r.body.toString('utf8'), stale: r.stale, problems: r.problems };
 }
