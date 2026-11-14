@@ -1,11 +1,11 @@
-import { chmod, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Command } from 'commander';
 import { addRegistry, removeRegistry } from '../../config/edit.js';
 import { parseRegistriesFile } from '../../config/load.js';
 import { configPath } from '../../paths.js';
-import { CliError, isJson, printJson, reportAndGuard, table, viaText, type Cli } from '../output.js';
+import { CliError, blockingError, isJson, printJson, reportProblems, table, viaText, type Cli } from '../output.js';
 
 const TYPES = ['github', 'http', 'github-registry', 'http-registry'] as const;
 const AUTHS = ['none', 'gh_cli', 'github_token', 'bearer'] as const;
@@ -47,10 +47,19 @@ function buildEntry(o: AddOpts): Record<string, unknown> {
 async function writeAtomic(file: string, data: string): Promise<void> {
   let target = file;
   let mode = 0o600;
-  try {
-    target = await realpath(file);
-    mode = (await stat(target)).mode & 0o7777;
-  } catch { /* new file */ }
+  let present = true;
+  try { await lstat(file); } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    present = false;
+  }
+  if (present) {
+    try {
+      target = await realpath(file);
+      mode = (await stat(target)).mode & 0o7777;
+    } catch (e) {
+      throw new CliError(`cannot write ${file}: it is a dangling symlink or unreadable (${(e as NodeJS.ErrnoException).code ?? 'error'}); refusing to replace it`);
+    }
+  }
   await mkdir(dirname(target), { recursive: true });
   const tmp = `${target}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
   try {
@@ -72,14 +81,7 @@ async function readConfigText(file: string, missing: string | undefined): Promis
   }
 }
 
-export function registerRegistries(program: Command, cli: Cli): void {
-  const reg = program.command('registries').description('show the resolved registry list; add or remove personal registries')
-    .action(async (_opts: unknown, cmd: Command) => {
-      const r = await cli.engine().registries();
-      reportAndGuard(cli.io, r.problems, r.registries.some((v) => v.stale), r.registries.map((v) => v.name),
-        r.registries.reduce((n, v) => n + v.skillCount, 0));
-      if (isJson(cmd)) return printJson(cli.io, r);
-      if (r.registries.length === 0) return cli.io.out('no registries configured\n');
+function printRegistries(cli: Cli, r: Awaited<ReturnType<ReturnType<Cli['engine']>['registries']>>): void {
       const rows = [['NAME', 'TYPE', 'VIA', 'SKILLS', 'REF', 'SHA', 'NOTES']];
       for (const v of r.registries) {
         const notes = [v.stale ? 'stale' : '', v.overriddenBy ? `overridden by ${v.overriddenBy.join(', ')}` : ''].filter(Boolean).join('; ');
@@ -88,6 +90,18 @@ export function registerRegistries(program: Command, cli: Cli): void {
       cli.io.out(table(rows));
       const regOverrides = r.overrides.filter((o) => o.kind === 'registry');
       for (const o of regOverrides) cli.io.out(`override: ${o.by.registry} (${viaText(o.by.via)}) replaces ${o.replaced.registry} (${viaText(o.replaced.via)})\n`);
+}
+
+export function registerRegistries(program: Command, cli: Cli): void {
+  const reg = program.command('registries').description('show the resolved registry list; add or remove personal registries')
+    .action(async (_opts: unknown, cmd: Command) => {
+      const r = await cli.engine().registries();
+      reportProblems(cli.io, r.problems, r.registries.some((v) => v.stale));
+      const blocked = await blockingError(cli, r.problems, r.registries.reduce((n, v) => n + v.skillCount, 0));
+      if (isJson(cmd)) printJson(cli.io, r);
+      else if (r.registries.length === 0) cli.io.out('no registries configured\n');
+      else printRegistries(cli, r);
+      if (blocked) throw blocked;
     });
 
   reg.command('add <name>').description("add a registry to the local config (keeps comments)")

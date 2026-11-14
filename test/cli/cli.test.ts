@@ -265,4 +265,25 @@ describe('cli', () => {
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
     expect(await readFile(real, 'utf8')).not.toContain('"x"');
   });
+
+  it('a sole inaccessible github-registry include exits 2 and names it; registries still prints first', async () => {
+    const s = await setup({ registries: { inc: { type: 'github-registry', owner: 'o', repo: 'ghost', ref: 'main' } } });
+    const r = await s.run('search', 'alpha');
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('inc');
+    expect(r.out).toBe('');
+    const j = await s.run('--json', 'registries');
+    expect(j.code).toBe(2);
+    expect(JSON.parse(j.out).problems.length).toBeGreaterThan(0);
+  });
+
+  it('registries add refuses a dangling symlink config', async () => {
+    const s = await setup();
+    const link = join(s.dir, 'dangling.jsonc');
+    await symlink(join(s.dir, 'nowhere.jsonc'), link);
+    s.ctx.env.SKILLSEEKR_CONFIG = link;
+    const r = await s.run('registries', 'add', 'x', '--type', 'http-registry', '--url', 'https://x');
+    expect(r.code).toBe(1);
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+  });
 });

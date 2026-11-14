@@ -39,27 +39,29 @@ export function reportProblems(io: Io, problems: Problem[], stale: boolean): voi
 }
 
 /**
- * Reports problems and stale state on stderr, then throws exit 2 when nothing could be loaded because of
- * them: a config/* error with nothing loaded, or registries configured and every one of them failed.
+ * The error to throw (exit 2) when nothing could be loaded: a config/* error with 0 skills, or every
+ * top-level entry of the local config failed (an error problem naming it) with 0 skills.
+ * Failed includes are dropped from resolution, so this works from the config's own entry names.
  */
-export function reportAndGuard(io: Io, problems: Problem[], stale: boolean, registryNames: string[], skillTotal: number): void {
-  reportProblems(io, problems, stale);
-  if (skillTotal > 0) return;
+export async function blockingError(cli: Cli, problems: Problem[], skillTotal: number): Promise<CliError | undefined> {
+  if (skillTotal > 0) return undefined;
   const errs = errorProblems(problems);
-  const configBroken = errs.some((p) => p.code.startsWith('config/'));
-  const allFailed = registryNames.length > 0 && registryNames.every((n) => errs.some((p) => p.registry === n));
-  if (configBroken || allFailed) {
-    throw new CliError(allFailed && !configBroken
-      ? `every configured registry failed to load (${registryNames.join(', ')}); see the problems above`
-      : 'the configuration prevents loading any skills (see the problems above)', 2);
+  if (errs.some((p) => p.code.startsWith('config/'))) {
+    return new CliError('the configuration prevents loading any skills (see the problems above)', 2);
   }
+  const names = (await cli.engine().config()).registries.map(([n]) => n);
+  if (names.length > 0 && names.every((n) => errs.some((p) => p.registry === n))) {
+    return new CliError(`every configured registry failed to load (${names.join(', ')}); see the problems above`, 2);
+  }
+  return undefined;
 }
 
 /** Loads the catalog, reports problems, and throws exit 2 if nothing usable could be loaded. */
 export async function loadCatalog(cli: Cli, opts: { force?: boolean } = {}): Promise<Catalog> {
   const catalog = await cli.engine().catalog(opts);
-  const { registries } = await cli.engine().registries();
-  reportAndGuard(cli.io, catalog.problems, catalog.stale, registries.map((r) => r.name), catalog.skills.length);
+  reportProblems(cli.io, catalog.problems, catalog.stale);
+  const blocked = await blockingError(cli, catalog.problems, catalog.skills.length);
+  if (blocked) throw blocked;
   return catalog;
 }
 
