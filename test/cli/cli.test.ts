@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, stat, symlink, writeFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { main } from '../../src/cli/main.js';
 import type { Ctx } from '../../src/context.js';
@@ -225,5 +225,44 @@ describe('cli', () => {
     expect(r.err).toContain('unknown command');
     expect((await s.run('--help')).code).toBe(0);
     expect((await s.run('search')).code).toBe(1);
+  });
+
+  it('every configured registry failing exits 2 and names the registry', async () => {
+    const s = await setup({ registries: { ghost: gh('ghost') } });
+    const r = await s.run('search', 'alpha');
+    expect(r.code).toBe(2);
+    expect(r.err).toMatch(/^ghost: /m);
+    expect(r.err).toContain('ghost');
+    expect(r.out).toBe('');
+    expect((await s.run('registries')).code).toBe(2);
+  });
+
+  it('update <name> for a name that is not installed exits 1; missing-from-catalog hints on stderr', async () => {
+    const s = await setup({ registries: { one: gh('one') } });
+    expect((await s.run('update', 'ghost')).code).toBe(1);
+    await s.run('install', 'cat/dup');
+    const path = join(s.dir, 'config.jsonc');
+    await writeFile(path, JSON.stringify({ cache: { dir: join(s.dir, 'cache') }, registries: { two: gh('two') } }));
+    const r = await s.run('update', 'dup');
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/dup\s+missing-from-catalog/);
+    expect(r.err).toContain('hint:');
+  });
+
+  it('registries add/remove follow a symlinked config and keep its mode', async () => {
+    const s = await setup();
+    const real = join(s.dir, 'real.jsonc');
+    await writeFile(real, '{ "registries": {} }\n');
+    await chmod(real, 0o640);
+    const link = join(s.dir, 'link.jsonc');
+    await symlink(real, link);
+    s.ctx.env.SKILLSEEKR_CONFIG = link;
+    expect((await s.run('registries', 'add', 'x', '--type', 'http-registry', '--url', 'https://x')).code).toBe(0);
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await readFile(real, 'utf8')).toContain('"x"');
+    expect((await stat(real)).mode & 0o777).toBe(0o640);
+    expect((await s.run('registries', 'remove', 'x')).code).toBe(0);
+    expect((await lstat(link)).isSymbolicLink()).toBe(true);
+    expect(await readFile(real, 'utf8')).not.toContain('"x"');
   });
 });

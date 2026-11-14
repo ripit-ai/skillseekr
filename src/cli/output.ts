@@ -38,17 +38,28 @@ export function reportProblems(io: Io, problems: Problem[], stale: boolean): voi
   if (stale) io.err(STALE_WARNING + '\n');
 }
 
-/** True when the config itself (not one registry) broke and nothing could be loaded. */
-export const configBroken = (problems: Problem[], empty: boolean): boolean =>
-  empty && problems.some((p) => p.level === 'error' && p.code.startsWith('config/'));
+/**
+ * Reports problems and stale state on stderr, then throws exit 2 when nothing could be loaded because of
+ * them: a config/* error with nothing loaded, or registries configured and every one of them failed.
+ */
+export function reportAndGuard(io: Io, problems: Problem[], stale: boolean, registryNames: string[], skillTotal: number): void {
+  reportProblems(io, problems, stale);
+  if (skillTotal > 0) return;
+  const errs = errorProblems(problems);
+  const configBroken = errs.some((p) => p.code.startsWith('config/'));
+  const allFailed = registryNames.length > 0 && registryNames.every((n) => errs.some((p) => p.registry === n));
+  if (configBroken || allFailed) {
+    throw new CliError(allFailed && !configBroken
+      ? `every configured registry failed to load (${registryNames.join(', ')}); see the problems above`
+      : 'the configuration prevents loading any skills (see the problems above)', 2);
+  }
+}
 
-/** Loads the catalog, reports problems, and throws exit 2 if a config error left it empty. */
+/** Loads the catalog, reports problems, and throws exit 2 if nothing usable could be loaded. */
 export async function loadCatalog(cli: Cli, opts: { force?: boolean } = {}): Promise<Catalog> {
   const catalog = await cli.engine().catalog(opts);
-  reportProblems(cli.io, catalog.problems, catalog.stale);
-  if (configBroken(catalog.problems, catalog.skills.length === 0)) {
-    throw new CliError('the configuration prevents loading any skills (see the problems above)', 2);
-  }
+  const { registries } = await cli.engine().registries();
+  reportAndGuard(cli.io, catalog.problems, catalog.stale, registries.map((r) => r.name), catalog.skills.length);
   return catalog;
 }
 

@@ -1,11 +1,11 @@
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Command } from 'commander';
 import { addRegistry, removeRegistry } from '../../config/edit.js';
 import { parseRegistriesFile } from '../../config/load.js';
 import { configPath } from '../../paths.js';
-import { CliError, configBroken, isJson, printJson, reportProblems, table, viaText, type Cli } from '../output.js';
+import { CliError, isJson, printJson, reportAndGuard, table, viaText, type Cli } from '../output.js';
 
 const TYPES = ['github', 'http', 'github-registry', 'http-registry'] as const;
 const AUTHS = ['none', 'gh_cli', 'github_token', 'bearer'] as const;
@@ -43,12 +43,20 @@ function buildEntry(o: AddOpts): Record<string, unknown> {
   return entry;
 }
 
+/** Follows a symlinked config, keeps the original file mode, and renames a temp file beside the real target. */
 async function writeAtomic(file: string, data: string): Promise<void> {
-  await mkdir(dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
+  let target = file;
+  let mode = 0o600;
   try {
-    await writeFile(tmp, data, { mode: 0o600 });
-    await rename(tmp, file);
+    target = await realpath(file);
+    mode = (await stat(target)).mode & 0o7777;
+  } catch { /* new file */ }
+  await mkdir(dirname(target), { recursive: true });
+  const tmp = `${target}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
+  try {
+    await writeFile(tmp, data, { mode });
+    await chmod(tmp, mode);
+    await rename(tmp, target);
   } catch (e) {
     await rm(tmp, { force: true }).catch(() => {});
     throw e;
@@ -68,8 +76,8 @@ export function registerRegistries(program: Command, cli: Cli): void {
   const reg = program.command('registries').description('show the resolved registry list; add or remove personal registries')
     .action(async (_opts: unknown, cmd: Command) => {
       const r = await cli.engine().registries();
-      reportProblems(cli.io, r.problems, r.registries.some((v) => v.stale));
-      if (configBroken(r.problems, r.registries.length === 0)) throw new CliError('the configuration prevents loading any registries (see the problems above)', 2);
+      reportAndGuard(cli.io, r.problems, r.registries.some((v) => v.stale), r.registries.map((v) => v.name),
+        r.registries.reduce((n, v) => n + v.skillCount, 0));
       if (isJson(cmd)) return printJson(cli.io, r);
       if (r.registries.length === 0) return cli.io.out('no registries configured\n');
       const rows = [['NAME', 'TYPE', 'VIA', 'SKILLS', 'REF', 'SHA', 'NOTES']];

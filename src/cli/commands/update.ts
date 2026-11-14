@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 import { updateInstalled } from '../../install/installer.js';
-import { isJson, loadCatalog, printJson, table, type Cli } from '../output.js';
+import { CliError, isJson, loadCatalog, printJson, table, type Cli } from '../output.js';
 
 export function registerUpdate(program: Command, cli: Cli): void {
   program.command('update [name]').description('update installed skills from the catalog')
@@ -12,8 +12,12 @@ export function registerUpdate(program: Command, cli: Cli): void {
         ...(name !== undefined && { name }), force: opts.force === true,
         scope: opts.user ? 'user' : 'project', projectDir: cli.ctx.cwd,
       });
+      if (name !== undefined && results.length === 0) throw new CliError(`"${name}" is not installed`);
+      if (results.some((r) => r.result === 'missing-from-catalog')) {
+        cli.io.err("hint: some installed skills are no longer in the catalog (registry removed, renamed or failing); check 'skillseekr registries'\n");
+      }
       if (isJson(cmd)) return printJson(cli.io, { results, stale: catalog.stale });
-      if (results.length === 0) return cli.io.out(name ? `"${name}" is not installed\n` : 'no skills installed\n');
+      if (results.length === 0) return cli.io.out('no skills installed\n');
       cli.io.out(table(results.map((r) => [r.name, r.result, r.dir])));
       if (results.some((r) => r.result === 'skipped-modified')) cli.io.out("modified installs were skipped; use --force to overwrite them\n");
     });
