@@ -1,0 +1,241 @@
+import { describe, it, expect } from 'vitest';
+import { mkdir, writeFile, readFile, readdir, stat, symlink } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { Ctx } from '../../src/context.js';
+import { Catalog, type SkillRecord } from '../../src/catalog/catalog.js';
+import { contentHash } from '../../src/catalog/hash.js';
+import type { ResolvedRegistry } from '../../src/resolve/resolve.js';
+import {
+  installSkill, listInstalled, statusOf, removeInstalled, updateInstalled, InstallError,
+} from '../../src/install/installer.js';
+import { presentTools, TOOL_TARGETS, PROJECT_SKILLS_DIR } from '../../src/install/targets.js';
+import { tmpDir } from '../helpers/tmp.js';
+
+async function put(dir: string, files: Record<string, string>) {
+  for (const [p, c] of Object.entries(files)) {
+    await mkdir(join(dir, p, '..'), { recursive: true });
+    await writeFile(join(dir, p), c);
+  }
+}
+const exists = (p: string) => stat(p).then(() => true, () => false);
+
+async function setup() {
+  const home = await tmpDir('ss-home-');
+  const proj = await tmpDir('ss-proj-');
+  const src = await tmpDir('ss-src-');
+  const ctx = { home, cwd: proj, env: {}, now: () => Date.UTC(2026, 0, 2) } as unknown as Ctx;
+  return { home, proj, src, ctx };
+}
+async function mkSkill(src: string, id: string, files: Record<string, string> = { 'SKILL.md': '---\nname: x\n---\nhi', 'references/a.md': 'A' }, name = id.split('/').pop()!): Promise<SkillRecord> {
+  const dir = join(src, id);
+  await put(dir, files);
+  const { hash, files: list } = await contentHash(dir);
+  return { id, name, description: 'd', dir, files: list, contentHash: hash, warnings: [], registry: 'reg', via: ['top', 'reg'], ref: 'main', sha: 'abc1234' };
+}
+const catalogOf = (...skills: SkillRecord[]) => {
+  const reg = { name: 'reg', via: ['top', 'reg'], entry: {} } as unknown as ResolvedRegistry;
+  return new Catalog([{ registry: reg, skills }], [], [], false);
+};
+
+describe('targets', () => {
+  it('has verified docs URLs and paths', () => {
+    expect(PROJECT_SKILLS_DIR).toBe('.claude/skills');
+    for (const t of Object.values(TOOL_TARGETS)) expect(t.docs).toMatch(/^https:\/\//);
+  });
+});
+
+describe('installSkill', () => {
+  it('project install copies the skill folder with a .skillseekr.json marker', async () => {
+    const { proj, src, ctx } = await setup();
+    const skill = await mkSkill(src, 'eng/tdd');
+    const r = await installSkill(skill, 'project', ctx);
+    const dir = join(proj, '.claude/skills/tdd');
+    expect(r).toEqual({ dirs: [dir], tools: [] });
+    expect(await readFile(join(dir, 'references/a.md'), 'utf8')).toBe('A');
+    const m = JSON.parse(await readFile(join(dir, '.skillseekr.json'), 'utf8'));
+    expect(m).toMatchObject({ id: 'eng/tdd', name: 'tdd', registry: 'reg', via: ['top', 'reg'], ref: 'main', sha: 'abc1234', contentHash: skill.contentHash });
+    expect(m.installedAt).toBe(new Date(Date.UTC(2026, 0, 2)).toISOString());
+    expect((await contentHash(dir)).hash).toBe(skill.contentHash);
+    expect((await readdir(join(proj, '.claude/skills'))).filter((n) => n.startsWith('.tmp-'))).toEqual([]);
+  });
+  it('honours opts.projectDir', async () => {
+    const { src, ctx } = await setup();
+    const other = await tmpDir();
+    await installSkill(await mkSkill(src, 'a'), 'project', ctx, { projectDir: other });
+    expect(await exists(join(other, '.claude/skills/a/SKILL.md'))).toBe(true);
+  });
+  it('user install writes to each present tool user dir', async () => {
+    const { home, src, ctx } = await setup();
+    await mkdir(join(home, TOOL_TARGETS.claude.homeMarker), { recursive: true });
+    await mkdir(join(home, TOOL_TARGETS.copilot.homeMarker), { recursive: true });
+    expect(await presentTools(ctx)).toEqual(['claude', 'copilot']);
+    const r = await installSkill(await mkSkill(src, 'tdd'), 'user', ctx);
+    expect(r.tools).toEqual(['claude', 'copilot']);
+    expect(r.dirs).toEqual([join(home, TOOL_TARGETS.claude.userSkillsDir, 'tdd'), join(home, TOOL_TARGETS.copilot.userSkillsDir, 'tdd')]);
+    for (const d of r.dirs) expect(await exists(join(d, '.skillseekr.json'))).toBe(true);
+    expect(await exists(join(home, TOOL_TARGETS.opencode.userSkillsDir))).toBe(false);
+  });
+  it('user install with no tools present returns empty', async () => {
+    const { src, ctx } = await setup();
+    expect(await installSkill(await mkSkill(src, 'tdd'), 'user', ctx)).toEqual({ dirs: [], tools: [] });
+  });
+  it('refuses a different id under the same name, naming the existing id', async () => {
+    const { src, ctx, proj } = await setup();
+    await installSkill(await mkSkill(src, 'eng/tdd'), 'project', ctx);
+    const other = await mkSkill(src, 'biz/tdd');
+    const err = await installSkill(other, 'project', ctx).catch((e) => e);
+    expect(err).toBeInstanceOf(InstallError);
+    expect(err.code).toBe('name-conflict');
+    expect(err.message).toContain('eng/tdd');
+    expect(JSON.parse(await readFile(join(proj, '.claude/skills/tdd/.skillseekr.json'), 'utf8')).id).toBe('eng/tdd');
+  });
+  it('refuses when the folder exists without a marker, leaving it untouched', async () => {
+    const { src, ctx, proj } = await setup();
+    await put(join(proj, '.claude/skills/tdd'), { 'mine.txt': 'keep' });
+    const err = await installSkill(await mkSkill(src, 'tdd'), 'project', ctx).catch((e) => e);
+    expect(err).toBeInstanceOf(InstallError);
+    expect(err.code).toBe('unmanaged-folder');
+    expect(await readFile(join(proj, '.claude/skills/tdd/mine.txt'), 'utf8')).toBe('keep');
+  });
+  it('re-installing the same id overwrites', async () => {
+    const { src, ctx, proj } = await setup();
+    await installSkill(await mkSkill(src, 'tdd'), 'project', ctx);
+    const v2 = await mkSkill(await tmpDir(), 'tdd', { 'SKILL.md': 'v2' });
+    await installSkill(v2, 'project', ctx);
+    const dir = join(proj, '.claude/skills/tdd');
+    expect(await readdir(dir)).toEqual(['.skillseekr.json', 'SKILL.md']);
+    expect(await readFile(join(dir, 'SKILL.md'), 'utf8')).toBe('v2');
+  });
+  it('rejects unsafe names before writing anything', async () => {
+    const { src, ctx, proj } = await setup();
+    const base = await mkSkill(src, 'tdd');
+    for (const name of ['', '.', '..', 'a/b', 'a\\b', 'a\0b', '../x']) {
+      const err = await installSkill({ ...base, name }, 'project', ctx).catch((e) => e);
+      expect(err, JSON.stringify(name)).toBeInstanceOf(InstallError);
+      expect(err.code).toBe('name-conflict');
+    }
+    expect(await exists(join(proj, '.claude'))).toBe(false);
+  });
+  it('copies only skill.files, not stray files or symlinks in the cache folder', async () => {
+    const { src, ctx, proj } = await setup();
+    const skill = await mkSkill(src, 'tdd');
+    await writeFile(join(skill.dir, 'stray.txt'), 'x');
+    await symlink('/etc/hostname', join(skill.dir, 'link'));
+    await installSkill(skill, 'project', ctx);
+    expect(await readdir(join(proj, '.claude/skills/tdd'))).toEqual(['.skillseekr.json', 'SKILL.md', 'references']);
+  });
+  it('leaves no .tmp-* behind on failure and keeps the previous install', async () => {
+    const { src, ctx, proj } = await setup();
+    await installSkill(await mkSkill(src, 'tdd'), 'project', ctx);
+    const bad = { ...(await mkSkill(await tmpDir(), 'tdd')), files: ['SKILL.md', 'missing.md'] };
+    await expect(installSkill(bad, 'project', ctx)).rejects.toThrow();
+    const root = join(proj, '.claude/skills');
+    expect(await readdir(root)).toEqual(['tdd']);
+    expect(await exists(join(root, 'tdd/references/a.md'))).toBe(true);
+  });
+  it('refuses file paths that escape the skill folder', async () => {
+    const { src, ctx, proj } = await setup();
+    const bad = { ...(await mkSkill(src, 'tdd')), files: ['SKILL.md', '../evil'] };
+    await expect(installSkill(bad, 'project', ctx)).rejects.toThrow();
+    expect(await readdir(join(proj, '.claude/skills'))).toEqual([]);
+  });
+});
+
+describe('listInstalled / statusOf', () => {
+  it('finds only marked folders and flags modified', async () => {
+    const { src, ctx, proj, home } = await setup();
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await installSkill(await mkSkill(src, 'a'), 'project', ctx);
+    await installSkill(await mkSkill(src, 'b'), 'project', ctx);
+    await installSkill(await mkSkill(src, 'c'), 'user', ctx);
+    await put(join(proj, '.claude/skills/unmarked'), { 'SKILL.md': 'x' });
+    await put(join(proj, '.claude/skills/badmarker'), { '.skillseekr.json': '{nope' });
+    await put(join(proj, '.claude/skills/wrongshape'), { '.skillseekr.json': '{"id":1}' });
+    await writeFile(join(proj, '.claude/skills/b/SKILL.md'), 'edited');
+    const all = await listInstalled(ctx);
+    expect(all.map((i) => `${i.scope}:${i.name}:${i.modified}:${i.tool ?? ''}`).sort()).toEqual(['project:a:false:', 'project:b:true:', 'user:c:false:claude']);
+    expect((await listInstalled(ctx, { scope: 'user' })).map((i) => i.name)).toEqual(['c']);
+    expect((await listInstalled(ctx, { scope: 'project' })).map((i) => i.name).sort()).toEqual(['a', 'b']);
+  });
+  it('returns [] when nothing exists', async () => {
+    const { ctx } = await setup();
+    expect(await listInstalled(ctx)).toEqual([]);
+  });
+  it('statusOf: current, outdated, modified, missing-from-catalog', async () => {
+    const { src, ctx, proj } = await setup();
+    const skill = await mkSkill(src, 'a');
+    await installSkill(skill, 'project', ctx);
+    const get = async () => (await listInstalled(ctx))[0]!;
+    expect(statusOf(await get(), catalogOf(skill))).toBe('current');
+    expect(statusOf(await get(), catalogOf({ ...skill, contentHash: 'sha256:other' }))).toBe('outdated');
+    expect(statusOf(await get(), catalogOf())).toBe('missing-from-catalog');
+    await writeFile(join(proj, '.claude/skills/a/SKILL.md'), 'edit');
+    expect(statusOf(await get(), catalogOf(skill))).toBe('modified');
+    expect(statusOf(await get(), catalogOf())).toBe('missing-from-catalog');
+  });
+});
+
+describe('removeInstalled', () => {
+  it('refuses unmarked folders and deletes marked ones', async () => {
+    const { src, ctx, proj } = await setup();
+    await put(join(proj, '.claude/skills/u'), { 'SKILL.md': 'x' });
+    const err = await removeInstalled('u', 'project', ctx).catch((e) => e);
+    expect(err.code).toBe('unmanaged-folder');
+    expect(await exists(join(proj, '.claude/skills/u/SKILL.md'))).toBe(true);
+    await installSkill(await mkSkill(src, 'a'), 'project', ctx);
+    expect(await removeInstalled('a', 'project', ctx)).toEqual([join(proj, '.claude/skills/a')]);
+    expect(await exists(join(proj, '.claude/skills/a'))).toBe(false);
+  });
+  it('throws not-installed when nothing is there; rejects unsafe names', async () => {
+    const { ctx } = await setup();
+    expect(await removeInstalled('zzz', 'project', ctx).catch((e) => e.code)).toBe('not-installed');
+    expect(await removeInstalled('..', 'project', ctx).catch((e) => e)).toBeInstanceOf(InstallError);
+  });
+  it('removes from every tool user dir', async () => {
+    const { src, ctx, home } = await setup();
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await mkdir(join(home, '.copilot'), { recursive: true });
+    await installSkill(await mkSkill(src, 'a'), 'user', ctx);
+    expect(await removeInstalled('a', 'user', ctx)).toHaveLength(2);
+  });
+});
+
+describe('updateInstalled', () => {
+  it('skips modified installs unless force', async () => {
+    const { src, ctx, proj } = await setup();
+    const skill = await mkSkill(src, 'a');
+    await installSkill(skill, 'project', ctx);
+    const file = join(proj, '.claude/skills/a/SKILL.md');
+    await writeFile(file, 'local edit');
+    const dir = join(proj, '.claude/skills/a');
+    const cat = catalogOf(skill);
+    expect(await updateInstalled(cat, ctx, { force: false })).toEqual([{ name: 'a', dir, result: 'skipped-modified' }]);
+    expect(await readFile(file, 'utf8')).toBe('local edit');
+    expect(await updateInstalled(cat, ctx, { force: true })).toEqual([{ name: 'a', dir, result: 'updated' }]);
+    expect(await readFile(file, 'utf8')).toContain('hi');
+  });
+  it('updates outdated, reports current and missing-from-catalog, filters by name', async () => {
+    const { src, ctx, proj } = await setup();
+    const a = await mkSkill(src, 'a');
+    const b = await mkSkill(src, 'b');
+    const c = await mkSkill(src, 'c');
+    for (const s of [a, b, c]) await installSkill(s, 'project', ctx);
+    const a2 = await mkSkill(await tmpDir(), 'a', { 'SKILL.md': 'new' });
+    const res = await updateInstalled(catalogOf(a2, b), ctx, { force: false });
+    const by = Object.fromEntries(res.map((r) => [r.name, r.result]));
+    expect(by).toEqual({ a: 'updated', b: 'current', c: 'missing-from-catalog' });
+    expect(await readFile(join(proj, '.claude/skills/a/SKILL.md'), 'utf8')).toBe('new');
+    const only = await updateInstalled(catalogOf(a2, b), ctx, { force: false, name: 'b' });
+    expect(only.map((r) => r.name)).toEqual(['b']);
+  });
+  it('updates in the same user tool dir', async () => {
+    const { src, ctx, home } = await setup();
+    await mkdir(join(home, '.copilot'), { recursive: true });
+    const a = await mkSkill(src, 'a');
+    await installSkill(a, 'user', ctx);
+    const a2 = await mkSkill(await tmpDir(), 'a', { 'SKILL.md': 'new' });
+    const res = await updateInstalled(catalogOf(a2), ctx, { force: false, scope: 'user' });
+    expect(res).toEqual([{ name: 'a', dir: join(home, '.copilot/skills/a'), result: 'updated' }]);
+    expect(await exists(join(home, '.claude'))).toBe(false);
+  });
+});
