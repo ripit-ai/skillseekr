@@ -1,5 +1,4 @@
 import { readFileSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -79,10 +78,14 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
       const r = resolveSkill(c, skill);
       if (r.error) return r.error;
       const s = r.skill;
-      const body = await readFile(join(s.dir, 'SKILL.md'), 'utf8');
+      const f = await c.readFile(s, 'SKILL.md');
+      if (f.kind === 'refused') return fail({ error: 'refused', reason: f.reason });
+      if (f.kind === 'missing') return fail({ error: 'not-found', message: `SKILL.md of "${s.id}" is missing from the cache; run "skillseekr sync"` });
       return ok({
         id: s.id, name: s.name, description: s.description, registry: s.registry, via: s.via,
-        body, files: s.files, path: s.dir, overrides: c.overridesFor(s.id), warnings: s.warnings,
+        // Over 1 MB (or binary): metadata only, like read_skill_file.
+        ...(f.kind === 'text' ? { body: f.content } : { skillMd: { kind: f.kind, size: f.size, path: f.path } }),
+        files: s.files, path: s.dir, overrides: c.overridesFor(s.id), warnings: s.warnings,
         stale: c.stale, problems: errorsOf(c.problems),
       });
     });

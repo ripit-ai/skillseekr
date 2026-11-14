@@ -66,6 +66,14 @@ describe('discoverSkills', () => {
     expect(s.description).toBe('');
     expect(s.warnings).toContain('missing frontmatter');
   });
+  it('a SKILL.md over 1 MB is indexed by folder name without parsing frontmatter, with a warning', async () => {
+    const root = await tmpDir();
+    const big = `---\nname: other\ndescription: d\n---\n${'x'.repeat(1024 * 1024)}`;
+    await put(root, 'skills/huge/SKILL.md', big);
+    const [s] = await discoverSkills(root, 'skills');
+    expect(s).toMatchObject({ id: 'huge', name: 'huge', description: '' });
+    expect(s!.warnings).toEqual([`SKILL.md is larger than 1 MB (${Buffer.byteLength(big)} bytes); frontmatter not read`]);
+  });
   it('name mismatch → indexed with warning naming both', async () => {
     const s = (await discoverSkills(join(FX, 'malformed'), 'skills')).find((x) => x.id === 'mismatch')!;
     expect(s.name).toBe('other-name');

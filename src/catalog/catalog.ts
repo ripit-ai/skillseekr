@@ -4,6 +4,7 @@ import type { DiscoveredSkill } from './discover.js';
 import type { ResolvedRegistry, Override } from '../resolve/resolve.js';
 import type { Problem } from '../types.js';
 import { Bm25Index } from './search.js';
+import { MAX_FILE_BYTES } from './limits.js';
 
 export interface SkillRecord extends DiscoveredSkill { registry: string; via: string[]; ref?: string; sha?: string; instructions?: string }
 export type Lookup = { kind: 'found'; skill: SkillRecord } | { kind: 'ambiguous'; ids: string[] } | { kind: 'missing' };
@@ -17,7 +18,6 @@ export interface SearchHit {
   overrode: Array<{ registry: string; via: string[] }>;
 }
 
-const MAX_BYTES = 1024 * 1024;
 const SNIFF_BYTES = 8192;
 const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -104,12 +104,12 @@ export class Catalog {
     if (!st) return { kind: 'refused', reason: 'empty path' };
     if (st.isDirectory()) return { kind: 'refused', reason: 'path is a directory' };
     if (!st.isFile()) return { kind: 'refused', reason: 'not a regular file' };
-    if (st.size > MAX_BYTES) return { kind: 'too_large', size: st.size, path: target };
+    if (st.size > MAX_FILE_BYTES) return { kind: 'too_large', size: st.size, path: target };
 
     try {
       const fh = await open(target, 'r');
       try {
-        const buf = Buffer.alloc(Math.min(st.size, MAX_BYTES));
+        const buf = Buffer.alloc(Math.min(st.size, MAX_FILE_BYTES));
         const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
         const data = buf.subarray(0, bytesRead);
         if (data.subarray(0, SNIFF_BYTES).includes(0)) return { kind: 'binary', size: st.size, path: target };

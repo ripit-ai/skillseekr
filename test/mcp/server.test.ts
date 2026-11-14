@@ -104,6 +104,16 @@ describe('mcp server', () => {
     expect(Array.isArray(amb.data.suggestions)).toBe(true);
   });
 
+  it('get_skill returns metadata instead of the body for a SKILL.md over 1 MB', async () => {
+    const big = skill('huge', 'x'.repeat(1024 * 1024));
+    const s = await setup({ repos: { 'o/one': { refs: { main: SHA }, commits: { [SHA]: { 'skills/huge/SKILL.md': big } } } }, registries: { one: gh('one') } });
+    const r = await s.call('get_skill', { skill: 'huge' });
+    expect(r.isError).toBe(false);
+    expect(r.data).not.toHaveProperty('body');
+    expect(r.data.skillMd).toEqual({ kind: 'too_large', size: Buffer.byteLength(big), path: join(r.data.path, 'SKILL.md') });
+    expect(r.data.warnings[0]).toMatch(/larger than 1 MB/);
+  });
+
   it('get_skill with an ambiguous bare name returns isError with candidates', async () => {
     const s = await setup({
       repos: { 'o/one': { refs: { main: SHA }, commits: { [SHA]: { 'skills/a/x/SKILL.md': skill('x'), 'skills/b/x/SKILL.md': skill('x') } } } },
@@ -136,7 +146,7 @@ describe('mcp server', () => {
     const s = await setup(fixture());
     const r = await s.call('install_skill', { skill: 'alpha' });
     expect(r.isError).toBe(false);
-    expect(r.data.dirs).toEqual([join(s.project, '.claude', 'skills', 'alpha')]);
+    expect(r.data).toEqual({ dirs: [join(s.project, '.claude', 'skills', 'alpha')], tools: ['claude', 'opencode', 'copilot'] });
     expect(await readFile(join(s.project, '.claude', 'skills', 'alpha', 'SKILL.md'), 'utf8')).toContain('ALPHA BODY');
     const l = await s.call('list_installed', { scope: 'project' });
     expect(l.data.installed).toEqual([{

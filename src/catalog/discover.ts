@@ -2,6 +2,7 @@ import { lstat, readdir, readFile } from 'node:fs/promises';
 import { join, basename } from 'node:path';
 import { parseFrontmatter } from './frontmatter.js';
 import { contentHash } from './hash.js';
+import { MAX_FILE_BYTES } from './limits.js';
 
 export interface DiscoveredSkill {
   id: string;
@@ -62,9 +63,15 @@ export async function discoverSkills(treeRoot: string, skillsDir: string): Promi
 async function build(dir: string, id: string): Promise<DiscoveredSkill> {
   const folder = basename(dir);
   const warnings: string[] = [];
-  const fm = parseFrontmatter(await readFile(join(dir, 'SKILL.md'), 'utf8'));
   let name = folder;
   let description = '';
+  const size = (await lstat(join(dir, 'SKILL.md'))).size;
+  if (size > MAX_FILE_BYTES) {
+    warnings.push(`SKILL.md is larger than 1 MB (${size} bytes); frontmatter not read`);
+    const { hash, files } = await contentHash(dir);
+    return { id, name, description, dir, files, contentHash: hash, warnings };
+  }
+  const fm = parseFrontmatter(await readFile(join(dir, 'SKILL.md'), 'utf8'));
   if (!fm.ok) {
     warnings.push('missing frontmatter');
   } else {

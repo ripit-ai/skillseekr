@@ -110,7 +110,10 @@ async function installInto(skill: SkillRecord, parent: string, folder: string, c
   return dest;
 }
 
-/** `opts.tools` (user scope only) limits the install to those tools; by default every present tool gets it. */
+/**
+ * `opts.tools` (user scope only) limits the install to those tools; by default every present tool gets it.
+ * `tools` in the result lists the tools that will load the install: all of them for project scope.
+ */
 export async function installSkill(skill: SkillRecord, scope: Scope, ctx: Ctx, opts?: { projectDir?: string; tools?: ToolId[] }): Promise<{ dirs: string[]; tools: ToolId[] }> {
   validateName(skill.name);
   const targets: Target[] = scope === 'project'
@@ -124,7 +127,8 @@ export async function installSkill(skill: SkillRecord, scope: Scope, ctx: Ctx, o
     dirs.push(await installInto(skill, t.dir, skill.name, ctx));
     if (t.tool) tools.push(t.tool);
   }
-  return { dirs, tools };
+  // Every supported tool reads the project's .claude/skills.
+  return { dirs, tools: scope === 'project' ? [...TOOL_IDS] : tools };
 }
 
 function scanTargets(ctx: Ctx, scope: Scope | undefined, opts?: { projectDir?: string }): Array<Target & { scope: Scope }> {

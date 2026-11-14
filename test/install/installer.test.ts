@@ -50,7 +50,8 @@ describe('installSkill', () => {
     const skill = await mkSkill(src, 'eng/tdd');
     const r = await installSkill(skill, 'project', ctx);
     const dir = join(proj, '.claude/skills/tdd');
-    expect(r).toEqual({ dirs: [dir], tools: [] });
+    // all three tools read the project's .claude/skills
+    expect(r).toEqual({ dirs: [dir], tools: ['claude', 'opencode', 'copilot'] });
     expect(await readFile(join(dir, 'references/a.md'), 'utf8')).toBe('A');
     const m = JSON.parse(await readFile(join(dir, '.skillseekr.json'), 'utf8'));
     expect(m).toMatchObject({ id: 'eng/tdd', name: 'tdd', registry: 'reg', via: ['top', 'reg'], ref: 'main', sha: 'abc1234', contentHash: skill.contentHash });

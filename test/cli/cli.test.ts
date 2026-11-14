@@ -87,11 +87,24 @@ describe('cli', () => {
     expect(r.out).toContain('via:         two');
   });
 
+  it('show prints metadata instead of a SKILL.md over 1 MB', async () => {
+    const big = skill('huge', 'x'.repeat(1024 * 1024));
+    const s = await setup({ registries: { one: gh('one') }, repos: { 'o/one': { refs: { main: SHA }, commits: { [SHA]: { 'skills/huge/SKILL.md': big } } } } });
+    const r = await s.run('show', 'huge');
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(new RegExp(`SKILL\\.md: too large \\(${Buffer.byteLength(big)} bytes\\); read it at .*huge/SKILL\\.md`));
+    expect(r.out).not.toContain('xxxx');
+    const j = JSON.parse((await s.run('--json', 'show', 'huge')).out);
+    expect(j).not.toHaveProperty('body');
+    expect(j.skillMd).toMatchObject({ kind: 'too_large', size: Buffer.byteLength(big) });
+  });
+
   it('install defaults to project scope; --user installs to present tools', async () => {
     const s = await setup({ registries: { one: gh('one') } });
     const r = await s.run('install', 'alpha');
     expect(r.code).toBe(0);
     expect(await readdir(join(s.cwd, '.claude', 'skills', 'alpha'))).toContain('.skillseekr.json');
+    expect(JSON.parse((await s.run('--json', 'install', 'alpha')).out).tools).toEqual(['claude', 'opencode', 'copilot']);
     const none = await s.run('install', '--user', 'alpha');
     expect(none.code).toBe(1);
     await mkdir(join(s.ctx.home, '.claude'));
