@@ -27,12 +27,16 @@ export async function writeState(cacheDir: string, key: string, value: unknown):
     await writeFile(tmp, JSON.stringify({ key, value }), { mode: 0o600 });
     await rename(tmp, file);
   } catch (e) {
-    await rm(tmp, { force: true });
+    await rm(tmp, { force: true }).catch(() => {});
     throw e;
   }
 }
 
-/** checkedAt and now in ms (ctx.now()); fresh while less than ttlSeconds have passed. ttl 0 is never fresh. */
+/**
+ * checkedAt and now in ms (ctx.now()); fresh while less than ttlSeconds have passed. ttl 0 is never
+ * fresh, and neither is a checkedAt in the future (clock went back, or a bogus record).
+ */
 export function isFresh(checkedAt: number, ttlSeconds: number, now: number): boolean {
-  return now - checkedAt < ttlSeconds * 1000;
+  const age = now - checkedAt;
+  return age >= 0 && age < ttlSeconds * 1000;
 }

@@ -68,5 +68,8 @@ describe('state', () => {
     expect(isFresh(0, 10, 10_000)).toBe(false);
     expect(isFresh(0, 10, 10_001)).toBe(false);
     expect(isFresh(1000, 0, 1000)).toBe(false);
+    // checkedAt in the future (clock went back): not fresh
+    expect(isFresh(1001, 10, 1000)).toBe(false);
+    expect(isFresh(1000, 10, 1000)).toBe(true);
   });
 });

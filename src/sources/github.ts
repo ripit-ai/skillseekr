@@ -13,10 +13,11 @@ export interface TreeResult { sha: string; root: string /* abs dir = repo root a
 
 interface Repo { owner: string; repo: string; ref: string; auth: Auth }
 interface RefState { sha: string; checkedAt: number }
-/** A failed request: transient failures (network, 5xx) may fall back to an older cached copy. */
-interface Failure { error: Problem; transient: boolean }
+/** A failed request or download. Any failure falls back to an older cached copy when one exists (R8). */
+interface Failure { error: Problem }
 
 export const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
+export const MAX_EXTRACT_BYTES = 500 * 1024 * 1024;
 const SHA_RE = /^[0-9a-f]{7,40}$/;
 const FULL_SHA_RE = /^[0-9a-f]{40}$/;
 const NAME_RE = /^[A-Za-z0-9_.-]+$/;
@@ -26,8 +27,9 @@ const EXTRACTABLE = new Set(['File', 'OldFile', 'ContiguousFile', 'Directory']);
 export function isShaRef(ref: string): boolean { return SHA_RE.test(ref); }
 
 const errorProblem = (code: string, message: string): Problem => ({ level: 'error', code, message });
-const fail = (code: string, message: string, transient = false): Failure =>
-  ({ error: errorProblem(code, message), transient });
+const fail = (code: string, message: string): Failure => ({ error: errorProblem(code, message) });
+/** Best-effort removal on error paths: a cleanup failure must never replace the Problem with a throw. */
+const cleanup = (p: string) => rm(p, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
 const short = (sha: string) => sha.slice(0, 7);
 const slug = (o: Repo) => `${o.owner}/${o.repo}`;
 
@@ -68,7 +70,7 @@ function extractable(path: string, entry: unknown): boolean {
 function failureFor(o: Repo, res: HttpResponse, what: string): Failure {
   const s = res.status;
   const where = `GitHub repo ${slug(o)} (HTTP ${s} while ${what})`;
-  if (s >= 500) return fail('source/unreachable', `${where}: server error`, true);
+  if (s >= 500) return fail('source/unreachable', `${where}: server error`);
   if (s === 429 || (s === 403 && res.headers['x-ratelimit-remaining'] === '0')) {
     const reset = Number(res.headers['x-ratelimit-reset']);
     const when = Number.isFinite(reset) && reset > 0 ? `; it resets at ${new Date(reset * 1000).toISOString()}` : '';
@@ -91,14 +93,14 @@ function failureFor(o: Repo, res: HttpResponse, what: string): Failure {
 
 type Get = (url: string, accept: string, what: string) => Promise<HttpResponse | Failure>;
 
-function getter(o: Repo, headers: Record<string, string>, ctx: Ctx): Get {
+function getter(o: Repo, headers: () => Promise<Record<string, string>>, ctx: Ctx): Get {
   return async (url, accept, what) => {
     let res: HttpResponse;
     try {
-      res = await ctx.http.get(url, { 'User-Agent': 'skillseekr', Accept: accept, ...headers }, { maxBytes: MAX_DOWNLOAD_BYTES });
+      res = await ctx.http.get(url, { 'User-Agent': 'skillseekr', Accept: accept, ...await headers() }, { maxBytes: MAX_DOWNLOAD_BYTES });
     } catch (e) {
       if (e instanceof TooLargeError) return fail('source/too-large', `GitHub repo ${slug(o)}: response while ${what} is over 100 MB`);
-      if (e instanceof NetworkError) return fail('source/unreachable', `GitHub repo ${slug(o)} is unreachable while ${what}: ${e.message}`, true);
+      if (e instanceof NetworkError) return fail('source/unreachable', `GitHub repo ${slug(o)} is unreachable while ${what}: ${e.message}`);
       throw e;
     }
     if (res.status < 200 || res.status > 299) return failureFor(o, res, what);
@@ -107,8 +109,7 @@ function getter(o: Repo, headers: Record<string, string>, ctx: Ctx): Get {
   };
 }
 
-const isFailure = (r: unknown): r is Failure =>
-  typeof r === 'object' && r !== null && 'error' in r && 'transient' in r;
+const isFailure = (r: unknown): r is Failure => typeof r === 'object' && r !== null && 'error' in r;
 
 // ---------- the shared flow: resolve the ref, use or fill the cache, fall back to stale ----------
 
@@ -121,9 +122,11 @@ async function withSha<T>(
   if (bad) return { error: bad };
   const problems: Problem[] = [];
   const base = `${ctx.githubApi.replace(/\/+$/, '')}/repos/${o.owner}/${o.repo}`;
-  const auth = await authHeaders(o.auth, { url: base, kind: 'github' }, { trusted: opts.trusted }, ctx);
-  if (auth.problem) problems.push(auth.problem);
-  const get = getter(o, auth.headers, ctx);
+  // Lazy (R9): a cache hit makes no request, so it must not spawn gh or report auth problems.
+  let auth: Promise<Record<string, string>> | undefined;
+  const headers = () => (auth ??= authHeaders(o.auth, { url: base, kind: 'github' }, { trusted: opts.trusted }, ctx)
+    .then((a) => { if (a.problem) problems.push(a.problem); return a.headers; }));
+  const get = getter(o, headers, ctx);
 
   const stale = async (prev: RefState | undefined, why: Failure) => {
     const value = prev ? await cached(prev.sha) : undefined;
@@ -147,10 +150,11 @@ async function withSha<T>(
     } else {
       const ref = o.ref.split('/').map(encodeURIComponent).join('/');
       const res = await get(`${base}/commits/${ref}`, 'application/vnd.github.sha', `resolving ref "${o.ref}"`);
-      if (isFailure(res)) return (res.transient && await stale(prev, res)) || { error: res.error };
+      if (isFailure(res)) return (await stale(prev, res)) ?? { error: res.error };
       sha = res.body.toString('utf8').trim();
       if (!FULL_SHA_RE.test(sha)) {
-        return { error: errorProblem('source/bad-response', `GitHub repo ${slug(o)}: resolving ref "${o.ref}" did not return a commit sha`) };
+        const bad = fail('source/bad-response', `GitHub repo ${slug(o)}: resolving ref "${o.ref}" did not return a commit sha`);
+        return (await stale(prev, bad)) ?? { error: bad.error };
       }
       stateKey = key;
     }
@@ -160,8 +164,9 @@ async function withSha<T>(
   if (value === undefined) {
     const got = await fetchNew(sha, get);
     if (isFailure(got)) {
-      const older = got.transient && prev && prev.sha !== sha ? await stale(prev, got) : undefined;
-      return older || { error: got.error };
+      // Only an older sha can be cached here (this sha's copy was just found missing).
+      const older = prev && prev.sha !== sha ? await stale(prev, got) : undefined;
+      return older ?? { error: got.error };
     }
     value = got;
   }
@@ -181,9 +186,28 @@ async function isDir(p: string): Promise<boolean> {
   try { return (await stat(p)).isDirectory(); } catch { return false; }
 }
 
-function extractTarball(buf: Buffer, cwd: string): Promise<void> {
+export class ExtractTooLargeError extends Error {
+  override name = 'ExtractTooLargeError';
+}
+
+/**
+ * Extract a (gzipped) GitHub tarball into cwd, dropping the top folder. Only plain files and dirs with
+ * safe relative names are written. Aborts with ExtractTooLargeError once the declared sizes of the
+ * entries to extract add up to more than maxBytes.
+ */
+export function extractTarball(buf: Buffer, cwd: string, maxBytes = MAX_EXTRACT_BYTES): Promise<void> {
   return new Promise((resolve, reject) => {
-    const u = extract({ cwd, strip: 1, filter: extractable, preservePaths: false, preserveOwner: false });
+    let total = 0;
+    const u = extract({
+      cwd, strip: 1, preservePaths: false, preserveOwner: false,
+      filter: (path, entry) => {
+        if (!extractable(path, entry)) return false;
+        total += (entry as ReadEntry).size ?? 0;
+        if (total <= maxBytes) return true;
+        u.abort(new ExtractTooLargeError(`it expands to more than ${maxBytes} bytes`));
+        return false;
+      },
+    });
     u.on('error', reject);
     u.on('close', () => resolve());
     u.end(buf);
@@ -205,13 +229,16 @@ async function storeTree(o: Repo, body: Buffer, repoDir: string, root: string): 
   try {
     await extractTarball(body, tmp);
   } catch (e) {
-    await rm(tmp, { recursive: true, force: true });
+    await cleanup(tmp);
+    if (e instanceof ExtractTooLargeError) {
+      return fail('source/too-large', `the tarball of GitHub repo ${slug(o)} is too large: ${e.message}`);
+    }
     return fail('source/bad-archive', `the tarball of GitHub repo ${slug(o)} could not be extracted: ${(e as Error).message}`);
   }
   try {
     await rename(tmp, root);
   } catch (e) {
-    await rm(tmp, { recursive: true, force: true });
+    await cleanup(tmp);
     if (!(await isDir(root))) {
       return fail('source/cache-error', `cannot write the cache for GitHub repo ${slug(o)}: ${(e as Error).message}`);
     }
@@ -260,7 +287,7 @@ export async function readGithubFile(
         await writeFile(tmp, res.body);
         await rename(tmp, file);
       } catch {
-        await rm(tmp, { force: true });
+        await cleanup(tmp);
         // Not cached this time; the content is still good to return.
       }
       return res.body.toString('utf8');

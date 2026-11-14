@@ -5,7 +5,11 @@ import { NetworkError, type Http, type HttpResponse } from '../../src/net/http.j
 
 // ---------- raw tar building (R2: names are written exactly as given) ----------
 
-export interface TarEntry { path: string; type: NonNullable<HeaderData['type']>; body?: string | Buffer; linkpath?: string }
+export interface TarEntry {
+  path: string; type: NonNullable<HeaderData['type']>; body?: string | Buffer; linkpath?: string;
+  /** Header size field; defaults to the body length (set it to fake a huge entry). */
+  size?: number;
+}
 
 /**
  * Raw ustar bytes built from hand-encoded 512-byte headers (tar's Header computes the checksum).
@@ -16,7 +20,7 @@ export function buildTar(entries: TarEntry[]): Buffer {
   for (const e of entries) {
     const body = Buffer.from(e.body ?? '');
     const header = new Header({
-      path: e.path, type: e.type, mode: e.type === 'Directory' ? 0o755 : 0o644, size: body.length,
+      path: e.path, type: e.type, mode: e.type === 'Directory' ? 0o755 : 0o644, size: e.size ?? body.length,
       mtime: new Date(0), uid: 0, gid: 0, uname: '', gname: '', linkpath: e.linkpath ?? '',
     });
     const block = Buffer.alloc(512);
