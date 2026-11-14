@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ListRootsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { createEngine } from '../../src/engine.js';
+import { createEngine, type Engine } from '../../src/engine.js';
 import { createMcpServer } from '../../src/mcp/server.js';
 import type { Ctx } from '../../src/context.js';
 import type { Http } from '../../src/net/http.js';
@@ -20,7 +20,7 @@ const gh = (repo: string) => ({ type: 'github', owner: 'o', repo, skills_dir: 's
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => { while (closers.length) await closers.pop()!(); });
 
-async function setup(opts: { repos?: FakeSpec; registries?: Record<string, unknown>; roots?: string[] | 'none' } = {}) {
+async function setup(opts: { repos?: FakeSpec; registries?: Record<string, unknown>; roots?: string[] | 'none'; hangRoots?: boolean; engine?: Engine } = {}) {
   const dir = await tmpDir();
   const github = fakeGithub(opts.repos ?? {});
   const http: Http = { get: (url, h, o) => github.http.get(url, h, o) };
@@ -32,11 +32,11 @@ async function setup(opts: { repos?: FakeSpec; registries?: Record<string, unkno
     env: { SKILLSEEKR_CONFIG: path }, home: join(dir, 'home'), cwd: join(dir, 'cwd'), http,
     exec: async () => ({ code: 1, stdout: '', stderr: '' }), now: () => 1_700_000_000_000, githubApi: API,
   };
-  const server = createMcpServer(createEngine(ctx), ctx);
+  const server = createMcpServer(opts.engine ?? createEngine(ctx), ctx, { rootsTimeoutMs: 100 });
   const withRoots = opts.roots !== 'none';
   const client = new Client({ name: 't', version: '0' }, { capabilities: withRoots ? { roots: {} } : {} });
   if (withRoots) {
-    client.setRequestHandler(ListRootsRequestSchema, async () => ({
+    client.setRequestHandler(ListRootsRequestSchema, async () => opts.hangRoots ? new Promise<never>(() => {}) : ({
       roots: (opts.roots as string[] | undefined ?? [project]).map((p) => ({ uri: /^[a-z]+:\/\//.test(p) ? p : pathToFileURL(p).href })),
     }));
   }
@@ -183,5 +183,19 @@ describe('mcp server', () => {
     expect(r.isError).toBe(false);
     expect(r.data.results).toEqual([]);
     expect(r.data.problems.map((p: { code: string }) => p.code)).toContain('config/missing');
+  });
+
+  it('a roots handler that never answers times out and falls back to ctx.cwd', async () => {
+    const s = await setup({ ...fixture(), hangRoots: true });
+    await mkdir(s.ctx.cwd, { recursive: true });
+    const r = await s.call('install_skill', { skill: 'alpha' });
+    expect(r.data.dirs).toEqual([join(s.ctx.cwd, '.claude', 'skills', 'alpha')]);
+  });
+
+  it('an unexpected throw becomes isError internal', async () => {
+    const engine = { catalog: async () => { throw new Error('boom'); }, registries: async () => ({}), config: async () => ({}) } as unknown as Engine;
+    const s = await setup({ engine });
+    const r = await s.call('search_skills', { query: 'x' });
+    expect(r).toMatchObject({ isError: true, data: { error: 'internal', message: 'boom' } });
   });
 });

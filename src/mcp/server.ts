@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -13,7 +14,7 @@ import type { Problem } from '../types.js';
 
 const INSTRUCTIONS = 'Use skillseekr to find organization skills before specialized or unfamiliar work. Call search_skills with a short description of the task; if a result fits, call get_skill and follow it, reading supporting files with read_skill_file. Say which registry a skill came from if the user asks or if it overrides another skill. Only call install_skill if the user asks to keep a skill or agrees when you offer.';
 
-type Result = { content: Array<{ type: 'text'; text: string }>; isError?: boolean };
+type Result = CallToolResult;
 const ok = (data: unknown): Result => ({ content: [{ type: 'text', text: JSON.stringify(data) }] });
 const fail = (data: unknown): Result => ({ ...ok(data), isError: true });
 const errorsOf = (ps: Problem[]) => ps.filter((p) => p.level === 'error');
@@ -28,13 +29,13 @@ function version(): string {
   }
 }
 
-export function createMcpServer(engine: Engine, ctx: Ctx): McpServer {
+export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs?: number } = {}): McpServer {
   const server = new McpServer({ name: 'skillseekr', version: version() }, { instructions: INSTRUCTIONS });
 
   async function projectDir(): Promise<string> {
     try {
       if (server.server.getClientCapabilities()?.roots) {
-        const { roots } = await server.server.listRoots();
+        const { roots } = await server.server.listRoots(undefined, { timeout: opts.rootsTimeoutMs ?? 2000 });
         const first = roots.find((r) => r.uri.startsWith('file://'));
         if (first) return fileURLToPath(first.uri);
       }
@@ -54,7 +55,7 @@ export function createMcpServer(engine: Engine, ctx: Ctx): McpServer {
     name: string, description: string, inputSchema: S,
     handler: (args: z.infer<z.ZodObject<S>>) => Promise<Result>,
   ) => {
-    server.registerTool(name, { description, inputSchema }, (async (args: z.infer<z.ZodObject<S>>) => {
+    server.registerTool(name, { description, inputSchema }, (async (args: z.infer<z.ZodObject<S>>): Promise<Result> => {
       try {
         return await handler(args);
       } catch (e) {
