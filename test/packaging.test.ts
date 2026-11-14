@@ -46,8 +46,7 @@ describe('npm package', () => {
   let files: string[] = [];
 
   beforeAll(async () => {
-    await run(npm, ['run', 'build', '--silent'], { cwd: root });
-    // --ignore-scripts: the build above is the prepare step; keeps lifecycle output out of the JSON.
+    // dist/ is built by the vitest globalSetup. --ignore-scripts keeps lifecycle output out of the JSON.
     const { stdout } = await run(npm, ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: root });
     files = (JSON.parse(stdout) as Array<{ files: Array<{ path: string }> }>)[0]!.files.map((f) => f.path);
   }, 180_000);

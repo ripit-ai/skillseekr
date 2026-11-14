@@ -1,12 +1,9 @@
-import { describe, it, expect, beforeAll } from 'vitest';
-import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { describe, it, expect } from 'vitest';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { fakeGithub } from '../helpers/fakeGithub.js';
@@ -14,14 +11,9 @@ import { tmpDir } from '../helpers/tmp.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const bin = join(root, 'dist', 'cli', 'main.js');
-const run = promisify(execFile);
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const SHA = 'c'.repeat(40);
 
-beforeAll(async () => {
-  if (!existsSync(bin)) await run(npm, ['run', 'build', '--silent'], { cwd: root });
-}, 180_000);
-
+// dist/ is built fresh by the vitest globalSetup (test/globalBuild.ts).
 describe('stdio end to end (built binary)', () => {
   it('search → get → read_skill_file → install (project) over real stdio and real HTTP', async () => {
     const dir = await tmpDir();

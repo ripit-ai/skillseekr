@@ -52,4 +52,10 @@ describe('discovery eval log parsing', () => {
     ].map((e) => JSON.stringify(e)).join('\n');
     expect(judge(callsFromCopilot(out), 'csv-data-cleaning').pass).toBe(true);
   });
+
+  it('only skillseekr tool names count, not any name ending in search_skills', () => {
+    const call = (name: string, input: unknown = {}) => ({ name, input, output: '' });
+    expect(judge([call('other_search_skills'), call('skillseekr_get_skill', { skill: 'csv-data-cleaning' })], 'csv-data-cleaning').searched).toBe(false);
+    expect(judge([call('search_skills'), call('mcp__skillseekr__get_skill', { skill: 'csv-data-cleaning' })], 'csv-data-cleaning').pass).toBe(true);
+  });
 });

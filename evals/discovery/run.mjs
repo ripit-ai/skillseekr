@@ -137,8 +137,8 @@ const safeJson = (s) => { try { return JSON.parse(s); } catch { return s; } };
 
 export const parsers = { claude: callsFromClaude, opencode: callsFromOpencode, copilot: callsFromCopilot };
 
-/** True if the tool name is the skillseekr tool (MCP names are prefixed per tool: mcp__skillseekr__x, skillseekr_x). */
-const is = (name, tool) => name === tool || name.endsWith(`__${tool}`) || name.endsWith(`_${tool}`) || name.endsWith(`-${tool}`) || name.endsWith(`.${tool}`);
+/** True only for the skillseekr tool: bare (`search_skills`) or prefixed by server name (mcp__skillseekr__x, skillseekr_x, skillseekr-x, skillseekr.x). */
+const is = (name, tool) => new RegExp(`^(?:(?:mcp__)?skillseekr(?:__|[_.-]))?${tool}$`).test(name);
 
 /** Judge one prompt: search_skills called, and get_skill returned (or was asked for) expectedId. */
 export function judge(calls, expectedId) {
@@ -197,6 +197,7 @@ export async function main(argv) {
     if (j.pass) passed++;
     console.log(`${j.pass ? 'PASS' : 'FAIL'} ${p.n}/${prompts.length} ${p.expectedId} searched=${j.searched} fetched=${j.fetched}${r.error ? ` (${r.error})` : ''}`);
   }
+  if (only) { console.log(`${tool}: ${passed}/${list.length} (partial run with --only, no verdict)`); return passed === list.length ? 0 : 1; }
   console.log(`${tool}: ${passed}/${list.length} (pass mark ${PASS_MARK}/10) ${passed >= PASS_MARK ? 'PASS' : 'FAIL'}`);
   return passed >= PASS_MARK ? 0 : 1;
 }

@@ -63,14 +63,14 @@ Automated, partial. `test/e2e/stdio.test.ts` > "search → get → read_skill_fi
 - `test/setup/setup.test.ts` > "setup reports an unreadable registry by name through doctor (AC-2)"
 - `test/mcp/server.test.ts` > "inaccessible registry is named in problems; others still work (AC-2)"
 - `test/resolve/resolve.test.ts` > "inaccessible registry is reported by name and others still load"
-- `test/doctor.test.ts` > "doctor reports config parse, each registry's access (fail names the registry), ..."
+- `test/doctor.test.ts` > "doctor reports config parse, each registry's access (fail names the registry), include loops, overrides (warn), unauthenticated GitHub sources (warn: rate limits), MCP registration per detected tool, and skill folder paths"
 - `test/cli/cli.test.ts` > "a sole inaccessible github-registry include exits 2 and names it; registries still prints first"
 
 ## AC-3: an agent finds and uses a relevant skill without being told its name
 
 Manual, by eval harness. See the header of `evals/discovery/run.mjs` for the full wiring. Short version:
 
-1. Check the set is consistent (offline, free): `node evals/discovery/run.mjs --dry-run`. Expected: `ok: 10 prompts, 10 skills, every expectedId exists`. The same check runs in `npm test` as `test/evals/discovery.test.ts` > "prompts.json is valid: 10 prompts, every expectedId is a skill, none names its skill".
+1. Manual: check the set is consistent (offline, free) with `node evals/discovery/run.mjs --dry-run`. Expected: `ok: 10 prompts, 10 skills, every expectedId exists`. `npm test` runs only the `validatePrompts` function, not the `--dry-run` command: `test/evals/discovery.test.ts` > "prompts.json is valid: 10 prompts, every expectedId is a skill, none names its skill".
 2. Publish `evals/discovery/skills` where the registry file points (ripit-ai/skillseekr, `main`, or edit `evals/discovery/registry/registries.jsonc` for your fork). Write an eval-only config that includes `evals/discovery/registry/registries.jsonc` via a `github-registry` entry, and run `skillseekr setup` so every tool has the server.
 3. For each tool, using that config (default models, no other skills installed):
 
@@ -125,7 +125,7 @@ Manual, by eval harness. See the header of `evals/discovery/run.mjs` for the ful
 ## AC-8b: included files cannot use `github_token`, `bearer` or `basic`
 
 - `test/resolve/resolve.test.ts` > "included entry with github_token is skipped with auth/untrusted-env-auth and its env var never read"
-- `test/validate.test.ts` > "validate on a skill dir flags ... untrusted env-var auth in includes"
+- `test/validate.test.ts` > "validate on a skill dir flags missing name/description and a name/folder mismatch; on a registries file reports parse errors, loops, and untrusted env-var auth in includes"
 
 ## AC-9: project installs, `remove`/`list`/`outdated`/`update`, local edits, unmarked folders
 
