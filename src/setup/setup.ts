@@ -32,6 +32,8 @@ export interface Registrar {
   register(ctx: Ctx, opts: { yes: boolean; dryRun?: boolean }): Promise<Change[]>;
   /** Where the registration lives, for doctor messages. */
   where?(ctx: Ctx): Promise<string>;
+  /** A registered-but-not-working note (say, a disabled plugin) that doctor reports as a warning. */
+  warning?(ctx: Ctx): Promise<string | undefined>;
 }
 
 export interface SetupOptions {
@@ -128,7 +130,7 @@ export async function setup(ctx: Ctx, opts: SetupOptions): Promise<SetupResult> 
   for (const r of regs) {
     try {
       const c = await r.register(ctx, { yes: opts.yes, dryRun: true });
-      if (r.id === 'claude') claudeViaMcp = c.some((x) => x.command?.includes(' mcp add '));
+      if (r.id === 'claude') claudeViaMcp = c.some((x) => x.route === 'mcp');
       planned.push(...c);
     } catch (e) {
       errors.push(`${r.id}: ${msg(e)}`);
@@ -146,9 +148,13 @@ export async function setup(ctx: Ctx, opts: SetupOptions): Promise<SetupResult> 
   const changes: Change[] = [];
   if (configMissing) {
     await mkdir(dirname(cfg), { recursive: true });
-    // 'wx': never overwrite a config that appeared since the plan.
-    await writeFile(cfg, defaultConfigText({ owner, repo, name: owner }), { flag: 'wx', mode: 0o600 });
-    changes.push(planned[0]!);
+    try {
+      // 'wx': a config that appeared since the plan is left alone.
+      await writeFile(cfg, defaultConfigText({ owner, repo, name: owner }), { flag: 'wx', mode: 0o600 });
+      changes.push(planned[0]!);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+    }
   }
   for (const r of regs) {
     try {

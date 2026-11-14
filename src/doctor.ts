@@ -87,7 +87,11 @@ export async function doctor(engine: Engine, ctx: Ctx, opts: { vscodeWorkspace?:
   for (const r of allRegistrars(opts)) {
     try {
       if (!(await r.detect(ctx))) continue;
-      if (await r.isRegistered(ctx)) add(`mcp:${r.id}`, 'ok', `registered: ${r.where ? await r.where(ctx) : r.id}`);
+      if (await r.isRegistered(ctx)) {
+        const note = r.warning ? await r.warning(ctx) : undefined;
+        if (note) add(`mcp:${r.id}`, 'warn', note);
+        else add(`mcp:${r.id}`, 'ok', `registered: ${r.where ? await r.where(ctx) : r.id}`);
+      }
       else add(`mcp:${r.id}`, 'warn', `skillseekr is not registered with ${r.id}${r.where ? ` (${await r.where(ctx)})` : ''}; run "skillseekr setup"`);
     } catch (e) {
       add(`mcp:${r.id}`, 'fail', `checking ${r.id} failed: ${msg(e)}`);

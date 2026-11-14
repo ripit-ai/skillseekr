@@ -4,7 +4,11 @@ import { writeFileAtomic } from '../atomicWrite.js';
 import type { Ctx } from '../context.js';
 
 /** One thing setup changed (or would change): a file edit, or a command it ran. */
-export interface Change { file?: string; command?: string; before?: string; after?: string; backup?: string }
+export interface Change {
+  file?: string; command?: string; before?: string; after?: string; backup?: string;
+  /** Claude Code only: which registration route this change belongs to. */
+  route?: 'plugin' | 'mcp';
+}
 
 /** Structural equality of JSON values. (jsonc-parser builds null-prototype objects, so util.isDeepStrictEqual won't do.) */
 export function jsonEqual(a: unknown, b: unknown): boolean {

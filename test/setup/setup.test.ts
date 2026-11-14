@@ -5,6 +5,7 @@ import type { Ctx, Exec, ExecResult } from '../../src/context.js';
 import { setup } from '../../src/setup/setup.js';
 import { claudeRegistrar } from '../../src/setup/registrars/claude.js';
 import { readJsonValue } from '../../src/setup/jsonMerge.js';
+import { opencodeRegistrar } from '../../src/setup/registrars/opencode.js';
 import { listInstalled } from '../../src/install/installer.js';
 import { fakeGithub } from '../helpers/fakeGithub.js';
 import { tmpDir } from '../helpers/tmp.js';
@@ -14,9 +15,9 @@ const ok = (stdout = ''): ExecResult => ({ code: 0, stdout, stderr: '' });
 const bad = (stderr = 'nope'): ExecResult => ({ code: 1, stdout: '', stderr });
 
 /** A stateful stand-in for the `claude` binary. Never runs anything real. */
-function fakeClaude(o: { binary?: boolean; plugin?: boolean; marketplaceFails?: boolean } = {}) {
+function fakeClaude(o: { binary?: boolean; plugin?: boolean; marketplaceFails?: boolean; pluginDisabled?: boolean } = {}) {
   const calls: string[] = [];
-  const state = { plugin: false, mcp: false };
+  const state = { plugin: o.pluginDisabled === true, mcp: false };
   const exec: Exec = async (cmd, args) => {
     calls.push([cmd, ...args].join(' '));
     if (cmd !== 'claude' || o.binary === false) return { code: 127, stdout: '', stderr: 'ENOENT' };
@@ -24,7 +25,7 @@ function fakeClaude(o: { binary?: boolean; plugin?: boolean; marketplaceFails?: 
     if (a === '--version') return ok('2.1.300 (Claude Code)\n');
     if (a === 'plugin list --json') {
       if (!o.plugin) return bad("error: unknown command 'plugin'");
-      return ok(JSON.stringify(state.plugin ? [{ id: 'skillseekr@skillseekr', version: '0.1.0', scope: 'user', enabled: true, installPath: '/x' }] : []));
+      return ok(JSON.stringify(state.plugin ? [{ id: 'skillseekr@skillseekr', version: '0.1.0', scope: 'user', enabled: !o.pluginDisabled, installPath: '/x' }] : []));
     }
     if (a === 'plugin marketplace add ripit-ai/skillseekr') return o.plugin && !o.marketplaceFails ? ok() : bad('Failed to clone marketplace repository');
     if (a === 'plugin install skillseekr@skillseekr --scope user') {
@@ -100,8 +101,9 @@ describe('setup', () => {
   it('setup registers only detected tools', async () => {
     const e = await env({ tools: ['.config/opencode'], claude: fakeClaude({ binary: false }) });
     const r = await setup(e.ctx, { yes: true });
-    expect(await readJsonValue(join(e.home, '.config/opencode/opencode.json'), ['mcp', 'servers', 'skillseekr']))
-      .toEqual({ type: 'local', command: ['skillseekr', 'mcp'] });
+    expect(await readJsonValue(join(e.home, '.config/opencode/opencode.json'), ['mcp', 'skillseekr']))
+      .toEqual({ type: 'local', command: ['skillseekr', 'mcp'], enabled: true });
+    expect(await readJsonValue(join(e.home, '.config/opencode/opencode.json'), ['mcp', 'servers'])).toBeUndefined();
     await expect(stat(join(e.home, '.copilot'))).rejects.toThrow();
     await expect(stat(join(e.home, '.vscode-server'))).rejects.toThrow();
     expect(r.changes.some((c) => c.command?.startsWith('claude'))).toBe(false);
@@ -191,6 +193,7 @@ describe('setup', () => {
       'claude plugin marketplace add ripit-ai/skillseekr',
       'claude plugin install skillseekr@skillseekr --scope user',
     ]);
+    expect(changes.map((c) => c.route)).toEqual(['plugin', 'plugin']);
     expect(e.claude.calls).not.toContain('claude mcp add --scope user skillseekr -- skillseekr mcp');
     expect(await reg.isRegistered(e.ctx)).toBe(true);
     expect(await reg.register(e.ctx, { yes: true })).toEqual([]);
@@ -198,6 +201,10 @@ describe('setup', () => {
     const f = await env({ claude: fakeClaude({ plugin: false }) });
     const changes2 = await reg.register(f.ctx, { yes: true });
     expect(changes2.map((c) => c.command)).toEqual(['claude mcp add --scope user skillseekr -- skillseekr mcp']);
+    expect(changes2.map((c) => c.route)).toEqual(['mcp']);
+    expect((await reg.register(f.ctx, { yes: true, dryRun: true }))).toEqual([]);
+    const fd = await env({ claude: fakeClaude({ plugin: false }) });
+    expect((await reg.register(fd.ctx, { yes: true, dryRun: true })).map((c) => c.route)).toEqual(['mcp']);
     expect(await reg.isRegistered(f.ctx)).toBe(true);
 
     // Plugin commands exist but the marketplace can't be added: fall back to mcp add.
@@ -233,5 +240,56 @@ describe('setup', () => {
     const fail = r.doctor.checks.find((c) => c.status === 'fail');
     expect(fail?.id).toBe('registry:acme');
     expect(fail?.message).toContain('acme');
+  });
+
+  it('opencode: writes the v1-compatible mcp.skillseekr and accepts an existing entry in either shape', async () => {
+    const reg = opencodeRegistrar();
+    for (const existing of [
+      { mcp: { servers: { skillseekr: { type: 'local', command: ['skillseekr', 'mcp'] } } } },
+      { mcp: { skillseekr: { type: 'local', command: ['skillseekr', 'mcp'], enabled: true } } },
+    ]) {
+      const e = await env({ tools: ['.config/opencode'], claude: fakeClaude({ binary: false }) });
+      const file = join(e.home, '.config/opencode/opencode.json');
+      await writeFile(file, JSON.stringify(existing));
+      const before = (await stat(file)).mtimeMs;
+      expect(await reg.isRegistered(e.ctx)).toBe(true);
+      expect(await reg.register(e.ctx, { yes: true })).toEqual([]);
+      const r = await setup(e.ctx, { yes: true, tools: ['opencode'] });
+      expect(r.changes.some((c) => c.file === file)).toBe(false);
+      expect((await stat(file)).mtimeMs).toBe(before);
+      expect(JSON.parse(await readFile(file, 'utf8'))).toEqual(existing);
+      expect(r.doctor.checks.find((c) => c.id === 'mcp:opencode')?.status).toBe('ok');
+    }
+  });
+
+  it('a disabled Claude plugin counts as the plugin route: no reinstall, doctor warns', async () => {
+    const e = await env({ claude: fakeClaude({ plugin: true, pluginDisabled: true }) });
+    const reg = claudeRegistrar();
+    expect(await reg.route(e.ctx)).toBe('plugin');
+    expect(await reg.register(e.ctx, { yes: true })).toEqual([]);
+    const r = await setup(e.ctx, { yes: true });
+    expect(e.claude.calls.filter((c) => /plugin install|mcp add|marketplace add/.test(c))).toEqual([]);
+    await expect(stat(join(e.home, '.claude/skills/skillseekr'))).rejects.toThrow();
+    const c = r.doctor.checks.find((x) => x.id === 'mcp:claude');
+    expect(c?.status).toBe('warn');
+    expect(c?.message).toMatch(/disabled/);
+    expect((await setup(e.ctx, { yes: true })).changes).toEqual([]);
+  });
+
+  it('a config that appears between plan and apply is left alone and setup continues', async () => {
+    const e = await env();
+    const theirs = '{ "registries": {} }\n';
+    const r = await setup(e.ctx, {
+      yes: false,
+      confirm: async () => {
+        await mkdir(join(e.home, '.config', 'skillseekr'), { recursive: true });
+        await writeFile(e.configFile, theirs);
+        return true;
+      },
+    });
+    expect(await readFile(e.configFile, 'utf8')).toBe(theirs);
+    expect(r.changes.some((c) => c.file === e.configFile)).toBe(false);
+    expect(r.changes.some((c) => c.file?.endsWith('mcp-config.json'))).toBe(true);
+    expect(r.doctor.checks.length).toBeGreaterThan(0);
   });
 });

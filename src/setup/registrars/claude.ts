@@ -47,14 +47,16 @@ async function pluginList(ctx: Ctx): Promise<Array<{ id?: unknown; enabled?: unk
 }
 
 export interface ClaudeRegistrar extends Registrar {
-  /** How skillseekr is registered with Claude Code now, if at all. */
+  /** How skillseekr is registered with Claude Code now, if at all. An installed but disabled plugin counts as 'plugin'. */
   route(ctx: Ctx): Promise<ClaudeRoute | undefined>;
 }
 
 export function claudeRegistrar(): ClaudeRegistrar {
+  const ours = async (ctx: Ctx) => (await pluginList(ctx))?.find((p) => p.id === PLUGIN);
+
+  // The user may have disabled the plugin on purpose: never reinstall over it (AC-10), doctor warns instead.
   async function route(ctx: Ctx): Promise<ClaudeRoute | undefined> {
-    const plugins = await pluginList(ctx);
-    if (plugins?.some((p) => p.id === PLUGIN && p.enabled !== false)) return 'plugin';
+    if (await ours(ctx)) return 'plugin';
     if ((await run(ctx, ['mcp', 'get', 'skillseekr'], 30_000)).code === 0) return 'mcp';
     return undefined;
   }
@@ -73,16 +75,18 @@ export function claudeRegistrar(): ClaudeRegistrar {
       if ((await route(ctx)) !== undefined) return [];
       const pluginsAvailable = (await pluginList(ctx)) !== undefined;
       if (opts.dryRun) {
-        return (pluginsAvailable ? [MARKETPLACE_ADD, PLUGIN_INSTALL] : [MCP_ADD]).map((a) => ({ command: cmdText(a) }));
+        return pluginsAvailable
+          ? [MARKETPLACE_ADD, PLUGIN_INSTALL].map((a) => ({ command: cmdText(a), route: 'plugin' as const }))
+          : [{ command: cmdText(MCP_ADD), route: 'mcp' as const }];
       }
       const changes: Change[] = [];
       let why = 'the plugin commands are not available';
       if (pluginsAvailable) {
         const m = await run(ctx, MARKETPLACE_ADD, 180_000);
         if (m.code === 0) {
-          changes.push({ command: cmdText(MARKETPLACE_ADD) });
+          changes.push({ command: cmdText(MARKETPLACE_ADD), route: 'plugin' });
           const i = await run(ctx, PLUGIN_INSTALL, 180_000);
-          if (i.code === 0) return [...changes, { command: cmdText(PLUGIN_INSTALL) }];
+          if (i.code === 0) return [...changes, { command: cmdText(PLUGIN_INSTALL), route: 'plugin' }];
           why = `${cmdText(PLUGIN_INSTALL)} failed: ${(i.stderr || i.stdout).trim()}`;
         } else {
           why = `${cmdText(MARKETPLACE_ADD)} failed: ${(m.stderr || m.stdout).trim()}`;
@@ -94,7 +98,11 @@ export function claudeRegistrar(): ClaudeRegistrar {
       if (a.code !== 0) {
         throw new Error(`could not register with Claude Code: ${why}; and ${cmdText(MCP_ADD)} failed: ${(a.stderr || a.stdout).trim()}`);
       }
-      return [...changes, { command: cmdText(MCP_ADD) }];
+      return [...changes, { command: cmdText(MCP_ADD), route: 'mcp' }];
+    },
+    async warning(ctx) {
+      const p = await ours(ctx);
+      return p && p.enabled === false ? `the ${PLUGIN} plugin is installed but disabled; enable it with "claude plugin enable ${PLUGIN}"` : undefined;
     },
     where: async (ctx) => {
       const r = await route(ctx);

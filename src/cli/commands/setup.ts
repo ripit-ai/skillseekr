@@ -25,8 +25,10 @@ function changeLines(changes: Change[]): string {
   }).join('');
 }
 
-const confirmWith = (io: Io) => async (planned: Change[]): Promise<boolean> => {
-  io.out(`skillseekr setup will make these changes:\n${changeLines(planned)}`);
+/** With --json, stdout carries only the result, so the preview goes to stderr. */
+const confirmWith = (io: Io, json: boolean) => async (planned: Change[]): Promise<boolean> => {
+  const preview = `skillseekr setup will make these changes:\n${changeLines(planned)}`;
+  if (json) io.err(preview); else io.out(preview);
   if (!io.prompt) throw new CliError('setup needs confirmation; re-run with --yes');
   const answer = (await io.prompt('Apply these changes? [Y/n] ')).trim();
   return answer === '' || /^y(es)?$/i.test(answer);
@@ -47,7 +49,7 @@ export function registerSetup(program: Command, cli: Cli): void {
           ...(tools ? { tools } : {}),
           ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
           ...(opts.vscodeWorkspace !== undefined ? { vscodeWorkspace: resolve(cli.ctx.cwd, opts.vscodeWorkspace) } : {}),
-          confirm: confirmWith(cli.io),
+          confirm: confirmWith(cli.io, isJson(cmd)),
         });
       } catch (e) {
         if (e instanceof CliError) throw e;

@@ -336,4 +336,16 @@ describe('cli', () => {
     expect(bad.code).toBe(1);
     expect(bad.err).toContain('emacs');
   });
+
+  it('setup --json without --yes keeps stdout pure JSON; the preview goes to stderr', async () => {
+    const s = await setup();
+    await mkdir(join(s.ctx.home, '.copilot'));
+    s.ctx.env.SKILLSEEKR_CONFIG = join(s.dir, 'json-config.jsonc');
+    const out: string[] = []; const err: string[] = [];
+    const io = { out: (x: string) => out.push(x), err: (x: string) => err.push(x), prompt: async () => '' };
+    await main(['--json', 'setup', '--tools', 'copilot'], { ctx: s.ctx, io });
+    const parsed = JSON.parse(out.join(''));
+    expect(parsed.changes.some((c: { file?: string }) => c.file?.endsWith('mcp-config.json'))).toBe(true);
+    expect(err.join('')).toContain('mcp-config.json');
+  });
 });
