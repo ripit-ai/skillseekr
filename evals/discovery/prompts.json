@@ -1,0 +1,42 @@
+[
+  {
+    "prompt": "I have the new-hire paperwork as a fillable PDF and a spreadsheet of employee details. Populate each employee's copy for me.",
+    "expectedId": "pdf-form-filling"
+  },
+  {
+    "prompt": "Our team wants to add a NOT NULL column plus an index to the 80M-row orders table. Is this change safe to run in production?",
+    "expectedId": "postgres-migration-review"
+  },
+  {
+    "prompt": "The checkout service keeps restarting in the prod cluster and new pods never become ready. Help me figure out why.",
+    "expectedId": "k8s-incident-triage"
+  },
+  {
+    "prompt": "The payments team publishes a swagger document. I want a typed TypeScript wrapper for calling it that stays in sync.",
+    "expectedId": "openapi-client-generation"
+  },
+  {
+    "prompt": "We tagged v2.4.0 yesterday. Draft the announcement for customers covering what changed since v2.3.0.",
+    "expectedId": "release-notes-writer"
+  },
+  {
+    "prompt": "I want to package our VPC and subnet setup so other teams can reuse it with their own inputs.",
+    "expectedId": "terraform-module-authoring"
+  },
+  {
+    "prompt": "Check our signup wizard for problems that would stop someone using only a keyboard or a screen reader.",
+    "expectedId": "react-accessibility-audit"
+  },
+  {
+    "prompt": "This report query takes 40 seconds on a table of 200 million rows. Make it fast.",
+    "expectedId": "sql-query-optimization"
+  },
+  {
+    "prompt": "Someone pushed an AWS access key to the main branch an hour ago. What do we do now?",
+    "expectedId": "leaked-secret-response"
+  },
+  {
+    "prompt": "The export from the vendor has mixed date formats, stray semicolons and repeated customer rows. Get it into shape.",
+    "expectedId": "csv-data-cleaning"
+  }
+]

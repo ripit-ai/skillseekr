@@ -1,0 +1,15 @@
+// Registries file for the AC-3 discovery eval. See the header of ../run.mjs for how to wire it.
+// The skills live in this repo, so point a GitHub-sourced registry at the folder.
+{
+  "registries": {
+    "discovery-eval": {
+      "type": "github",
+      "owner": "ripit-ai",
+      "repo": "skillseekr",
+      "skills_dir": "evals/discovery/skills",
+      "ref": "main",
+      "description": "Ten skills used to measure agent discovery (AC-3)",
+      "auth": { "type": "gh_cli" }
+    }
+  }
+}
