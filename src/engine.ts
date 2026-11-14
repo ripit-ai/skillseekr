@@ -12,7 +12,7 @@ import { materializeHttpSkill } from './sources/http.js';
 import type { CacheSettings, Config, Problem, SourceEntry } from './types.js';
 
 export interface RegistryView {
-  name: string; type: SourceEntry['type']; via: string[]; description?: string; instructions?: string;
+  name: string; type: SourceEntry['type']; auth: SourceEntry['auth']['type']; via: string[]; description?: string; instructions?: string;
   ref?: string; sha?: string; cacheAgeSeconds?: number; stale: boolean; skillCount: number; overriddenBy?: string[];
 }
 export interface Engine {
@@ -136,7 +136,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
           && o.by.via.join('\0') !== r.reg.via.join('\0'))
         .map((o) => o.by.registry))];
       return {
-        name: r.reg.name, type: e.type, via: r.reg.via,
+        name: r.reg.name, type: e.type, auth: e.auth.type, via: r.reg.via,
         ...(e.description !== undefined ? { description: e.description } : {}),
         ...(e.instructions !== undefined ? { instructions: e.instructions } : {}),
         ...(e.type === 'github' ? { ref: e.ref } : {}),

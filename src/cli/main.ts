@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { Command, CommanderError } from 'commander';
 import { defaultContext, type Ctx } from '../context.js';
@@ -13,16 +14,19 @@ import { registerRegistries } from './commands/registries.js';
 import { registerRemove } from './commands/remove.js';
 import { registerSearch } from './commands/search.js';
 import { registerShow } from './commands/show.js';
+import { registerDoctor } from './commands/doctor.js';
+import { registerSetup } from './commands/setup.js';
 import { registerSync } from './commands/sync.js';
 import { registerUpdate } from './commands/update.js';
+import { registerValidate } from './commands/validate.js';
 import { CliError, type Cli, type Io } from './output.js';
 
 export type { Io } from './output.js';
 
-/** Command registrars. Task 13 appends setup, doctor and validate here. */
+/** Command registrars, in help order. */
 export const commands: Array<(program: Command, cli: Cli) => void> = [
-  registerSearch, registerShow, registerInstall, registerRemove, registerList, registerOutdated,
-  registerUpdate, registerRegistries, registerSync, registerMcp,
+  registerSetup, registerSearch, registerShow, registerInstall, registerRemove, registerList, registerOutdated,
+  registerUpdate, registerRegistries, registerSync, registerDoctor, registerValidate, registerMcp,
 ];
 
 function version(): string {
@@ -60,7 +64,19 @@ export function buildProgram(ctx: Ctx, io: Io): Command {
   return program;
 }
 
-const stdIo: Io = { out: (s) => { process.stdout.write(s); }, err: (s) => { process.stderr.write(s); } };
+async function promptLine(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return await new Promise<string>((res) => {
+      rl.once('close', () => res(''));
+      rl.question(question, res);
+    });
+  } finally {
+    rl.close();
+  }
+}
+
+const stdIo: Io = { out: (s) => { process.stdout.write(s); }, err: (s) => { process.stderr.write(s); }, prompt: promptLine };
 
 export async function main(argv: string[], deps: { ctx?: Ctx; io?: Io } = {}): Promise<number> {
   const io = deps.io ?? stdIo;

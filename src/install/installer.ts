@@ -107,11 +107,12 @@ async function installInto(skill: SkillRecord, parent: string, folder: string, c
   return dest;
 }
 
-export async function installSkill(skill: SkillRecord, scope: Scope, ctx: Ctx, opts?: { projectDir?: string }): Promise<{ dirs: string[]; tools: ToolId[] }> {
+/** `opts.tools` (user scope only) limits the install to those tools; by default every present tool gets it. */
+export async function installSkill(skill: SkillRecord, scope: Scope, ctx: Ctx, opts?: { projectDir?: string; tools?: ToolId[] }): Promise<{ dirs: string[]; tools: ToolId[] }> {
   validateName(skill.name);
   const targets: Target[] = scope === 'project'
     ? [{ dir: projectRoot(ctx, opts) }]
-    : (await presentTools(ctx)).map((tool) => ({ dir: userDir(ctx, tool), tool }));
+    : (opts?.tools ?? await presentTools(ctx)).map((tool) => ({ dir: userDir(ctx, tool), tool }));
   // Check every slot before writing to any.
   for (const t of targets) await checkSlot(join(t.dir, skill.name), skill);
   const dirs: string[] = [];

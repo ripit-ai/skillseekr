@@ -1,0 +1,119 @@
+import { lstat, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { Ctx } from './context.js';
+import type { Engine } from './engine.js';
+import { listInstalled } from './install/installer.js';
+import { TOOL_TARGETS, presentTools } from './install/targets.js';
+import { allRegistrars, starterDir, STARTER_NAME } from './setup/setup.js';
+import type { Auth, Problem } from './types.js';
+
+export interface DoctorCheck { id: string; status: 'ok' | 'warn' | 'fail'; message: string }
+export interface DoctorReport { checks: DoctorCheck[] }
+
+const LOOP_CODES = new Set(['resolve/include-loop', 'resolve/too-deep']);
+const oneLine = (s: string) => s.replace(/\s*\n\s*/g, ' ');
+const viaText = (via: string[]) => via.join(' → ');
+const isGithubType = (t: string) => t === 'github' || t === 'github-registry';
+const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/**
+ * Checks the config parse, every registry's access and auth, include loops, overrides, MCP registration for each
+ * detected tool, and each present tool's skill folder. Never throws; a failing check is reported instead.
+ */
+export async function doctor(engine: Engine, ctx: Ctx, opts: { vscodeWorkspace?: string } = {}): Promise<DoctorReport> {
+  const checks: DoctorCheck[] = [];
+  const add = (id: string, status: DoctorCheck['status'], message: string) => checks.push({ id, status, message: oneLine(message) });
+
+  // Config.
+  const config = await engine.config();
+  const configProblems = config.problems.filter((p) => !p.registry && p.level === 'error');
+  if (configProblems.length > 0) add('config', 'fail', configProblems.map((p) => p.message).join('; '));
+  else add('config', 'ok', `${config.path}: ${config.registries.length} top-level ${config.registries.length === 1 ? 'entry' : 'entries'}`);
+
+  const catalog = await engine.catalog();
+  const { registries: views, includes, problems } = await engine.registries();
+  const forName = (name: string) => problems.filter((p) => p.registry === name);
+
+  // Registry access, one check per name (top-level entries, includes, resolved sources, and anything a problem names).
+  const names: string[] = [];
+  const note = (n: string) => { if (!names.includes(n)) names.push(n); };
+  config.registries.forEach(([n]) => note(n));
+  includes.forEach((i) => note(i.name));
+  views.forEach((v) => note(v.name));
+  problems.forEach((p) => { if (p.registry && !p.code.startsWith('auth/') && !LOOP_CODES.has(p.code)) note(p.registry); });
+  for (const name of names) {
+    const own = forName(name).filter((p) => !p.code.startsWith('auth/') && !LOOP_CODES.has(p.code));
+    const errs = own.filter((p) => p.level === 'error');
+    const warns = own.filter((p) => p.level === 'warning');
+    const view = views.find((v) => v.name === name);
+    const inc = includes.find((i) => i.name === name);
+    if (errs.length > 0) add(`registry:${name}`, 'fail', `registry "${name}" can't be used: ${errs.map((p) => p.message).join('; ')}`);
+    else if (warns.length > 0) add(`registry:${name}`, 'warn', `registry "${name}": ${warns.map((p) => p.message).join('; ')}`);
+    else if (view) add(`registry:${name}`, 'ok', `registry "${name}" (${view.type}, via ${viaText(view.via)}): ${view.skillCount} skills${view.sha ? ` at ${view.sha.slice(0, 7)}` : ''}`);
+    else if (inc) add(`registry:${name}`, 'ok', `registries file "${name}" (${inc.entry.type}, via ${viaText(inc.via)}) read${inc.sha ? ` at ${inc.sha.slice(0, 7)}` : ''}`);
+    else add(`registry:${name}`, 'warn', `registry "${name}" was not loaded`);
+  }
+
+  // Include loops and depth.
+  const loops = problems.filter((p) => p.code === 'resolve/include-loop');
+  if (loops.length > 0) add('include-loop', 'warn', `include loop skipped: ${loops.map((p) => p.message).join('; ')}`);
+  else add('include-loop', 'ok', 'no include loops');
+  const deep = problems.filter((p) => p.code === 'resolve/too-deep');
+  if (deep.length > 0) add('include-depth', 'warn', deep.map((p) => p.message).join('; '));
+
+  // Overrides.
+  for (const o of catalog.overrides) {
+    add(`override:${o.kind}:${o.key}`, 'warn',
+      `${o.kind} "${o.key}" from ${o.by.registry} (via ${viaText(o.by.via)}) replaces the one from ${o.replaced.registry} (via ${viaText(o.replaced.via)})`);
+  }
+
+  // Auth, per registry name (last declaration wins, as in resolution).
+  const auths = new Map<string, { type: string; auth: Auth['type'] }>();
+  config.registries.forEach(([n, e]) => auths.set(n, { type: e.type, auth: e.auth.type }));
+  includes.forEach((i) => auths.set(i.name, { type: i.entry.type, auth: i.entry.auth.type }));
+  views.forEach((v) => auths.set(v.name, { type: v.type, auth: v.auth }));
+  const authNames = [...auths.keys()];
+  problems.forEach((p) => { if (p.registry && p.code.startsWith('auth/') && !authNames.includes(p.registry)) authNames.push(p.registry); });
+  for (const name of authNames) {
+    const a = auths.get(name);
+    const authProblems: Problem[] = forName(name).filter((p) => p.code.startsWith('auth/'));
+    if (authProblems.length > 0) add(`auth:${name}`, 'warn', `registry "${name}": ${[...new Set(authProblems.map((p) => p.message))].join('; ')}`);
+    else if (a && isGithubType(a.type) && a.auth === 'none') {
+      add(`auth:${name}`, 'warn', `registry "${name}" uses unauthenticated GitHub API requests, which hit GitHub's rate limit of 60 per hour; use "auth": { "type": "gh_cli" }`);
+    } else if (a) add(`auth:${name}`, 'ok', `registry "${name}": ${a.auth} auth`);
+  }
+
+  // MCP registration per detected tool.
+  for (const r of allRegistrars(opts)) {
+    try {
+      if (!(await r.detect(ctx))) continue;
+      if (await r.isRegistered(ctx)) add(`mcp:${r.id}`, 'ok', `registered: ${r.where ? await r.where(ctx) : r.id}`);
+      else add(`mcp:${r.id}`, 'warn', `skillseekr is not registered with ${r.id}${r.where ? ` (${await r.where(ctx)})` : ''}; run "skillseekr setup"`);
+    } catch (e) {
+      add(`mcp:${r.id}`, 'fail', `checking ${r.id} failed: ${msg(e)}`);
+    }
+  }
+
+  // Skill folders of present tools.
+  const installed = await listInstalled(ctx, { scope: 'user' });
+  for (const tool of await presentTools(ctx)) {
+    const dir = join(ctx.home, TOOL_TARGETS[tool].userSkillsDir);
+    let isDir: boolean | undefined;
+    try { isDir = (await stat(dir)).isDirectory(); } catch { /* missing */ }
+    if (isDir === false) { add(`skills-dir:${tool}`, 'fail', `${dir} exists but is not a folder`); continue; }
+    const starter = starterDir(ctx, tool);
+    let starterPresent = false;
+    try { await lstat(starter); starterPresent = true; } catch { /* none */ }
+    const mine = installed.filter((i) => i.tool === tool);
+    const starterManaged = mine.find((i) => i.dir === starter && i.marker.id === STARTER_NAME);
+    if (starterPresent && !starterManaged) {
+      add(`skills-dir:${tool}`, 'warn', `${starter} exists without a skillseekr marker (or holds another skill); setup leaves it alone, so the starter skill is not installed there`);
+    } else if (isDir === undefined) {
+      add(`skills-dir:${tool}`, 'ok', `${dir} (not created yet)`);
+    } else {
+      add(`skills-dir:${tool}`, 'ok', `${dir}: ${mine.length} skillseekr-managed ${mine.length === 1 ? 'skill' : 'skills'}`);
+    }
+  }
+
+  return { checks };
+}

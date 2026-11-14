@@ -4,7 +4,11 @@ import type { Ctx } from '../context.js';
 import type { Engine } from '../engine.js';
 import type { Problem } from '../types.js';
 
-export interface Io { out(s: string): void; err(s: string): void }
+export interface Io {
+  out(s: string): void; err(s: string): void;
+  /** Asks one question and resolves with the answer line (setup's confirmation). Defaults to reading stdin. */
+  prompt?(question: string): Promise<string>;
+}
 
 /** Everything a command needs. Task 13's commands register against the same shape. */
 export interface Cli { ctx: Ctx; io: Io; engine(): Engine }

@@ -286,4 +286,54 @@ describe('cli', () => {
     expect(r.code).toBe(1);
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
   });
+
+  it('doctor prints checks and exits 1 when a check fails; --json prints the report', async () => {
+    const s = await setup({ registries: { one: gh('one'), gone: gh('gone') } });
+    const r = await s.run('doctor');
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^fail\s+registry:gone\s+.*gone/m);
+    expect(r.out).toMatch(/^ok\s+registry:one/m);
+    const j = await s.run('--json', 'doctor');
+    expect(j.code).toBe(1);
+    expect(JSON.parse(j.out).checks.some((c: { id: string }) => c.id === 'config')).toBe(true);
+    const good = await setup({ registries: { one: gh('one') } });
+    expect((await good.run('doctor')).code).toBe(0);
+  });
+
+  it('validate exits 1 on errors, 0 when valid, and defaults to the cwd', async () => {
+    const s = await setup();
+    const d = join(s.cwd, 'my-skill');
+    await mkdir(d);
+    await writeFile(join(d, 'SKILL.md'), '---\nname: wrong\ndescription: x\n---\n');
+    const r = await s.run('validate', d);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain('skill/name-mismatch');
+    await writeFile(join(d, 'SKILL.md'), '---\nname: my-skill\ndescription: x\n---\n');
+    expect((await s.run('validate', d)).code).toBe(0);
+    s.ctx.cwd = d;
+    const def = await s.run('validate');
+    expect(def.code).toBe(0);
+    expect(def.out).toContain(d);
+  });
+
+  it('setup asks once via the injected prompt; empty answer means yes; "n" aborts', async () => {
+    const s = await setup();
+    await mkdir(join(s.ctx.home, '.copilot'));
+    s.ctx.env.SKILLSEEKR_CONFIG = join(s.dir, 'new-config.jsonc');
+    const answers = ['n', ''];
+    const asked: string[] = [];
+    const out: string[] = []; const err: string[] = [];
+    const io = { out: (x: string) => out.push(x), err: (x: string) => err.push(x), prompt: async (q: string) => { asked.push(q); return answers.shift()!; } };
+    expect(await main(['setup', '--tools', 'copilot'], { ctx: s.ctx, io })).toBe(1);
+    await expect(stat(join(s.ctx.home, '.copilot', 'mcp-config.json'))).rejects.toThrow();
+    expect(out.join('')).toContain('mcp-config.json');
+    out.length = 0;
+    await main(['setup', '--tools', 'copilot'], { ctx: s.ctx, io });
+    expect(asked).toHaveLength(2);
+    expect(JSON.parse(await readFile(join(s.ctx.home, '.copilot', 'mcp-config.json'), 'utf8')).mcpServers.skillseekr.command).toBe('skillseekr');
+    expect(out.join('')).toMatch(/doctor/i);
+    const bad = await s.run('setup', '--tools', 'emacs', '--yes');
+    expect(bad.code).toBe(1);
+    expect(bad.err).toContain('emacs');
+  });
 });

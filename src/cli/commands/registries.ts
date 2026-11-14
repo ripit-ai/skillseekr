@@ -1,7 +1,6 @@
-import { chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import type { Command } from 'commander';
+import { UnsafeWriteError, writeFileAtomic } from '../../atomicWrite.js';
 import { addRegistry, removeRegistry } from '../../config/edit.js';
 import { parseRegistriesFile } from '../../config/load.js';
 import { configPath } from '../../paths.js';
@@ -43,31 +42,12 @@ function buildEntry(o: AddOpts): Record<string, unknown> {
   return entry;
 }
 
-/** Follows a symlinked config, keeps the original file mode, and renames a temp file beside the real target. */
+/** The shared atomic writer, with a refused (dangling symlink) target reported as a user error. */
 async function writeAtomic(file: string, data: string): Promise<void> {
-  let target = file;
-  let mode = 0o600;
-  let present = true;
-  try { await lstat(file); } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-    present = false;
-  }
-  if (present) {
-    try {
-      target = await realpath(file);
-      mode = (await stat(target)).mode & 0o7777;
-    } catch (e) {
-      throw new CliError(`cannot write ${file}: it is a dangling symlink or unreadable (${(e as NodeJS.ErrnoException).code ?? 'error'}); refusing to replace it`);
-    }
-  }
-  await mkdir(dirname(target), { recursive: true });
-  const tmp = `${target}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
   try {
-    await writeFile(tmp, data, { mode });
-    await chmod(tmp, mode);
-    await rename(tmp, target);
+    await writeFileAtomic(file, data);
   } catch (e) {
-    await rm(tmp, { force: true }).catch(() => {});
+    if (e instanceof UnsafeWriteError) throw new CliError(e.message);
     throw e;
   }
 }
