@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readdir, writeFile } from 'node:fs/promises';
+import { readdir, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createEngine } from '../src/engine.js';
 import { discoverSkills } from '../src/catalog/discover.js';
@@ -207,6 +207,69 @@ describe('engine', () => {
     const r = await engine.registries();
     expect(r.registries).toEqual([]);
     expect(r.problems[0]!.code).toBe('engine/load-failed');
+  });
+
+  it('a config file edit reloads the memo even before the TTL', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }), 'o/q': repoWith({ 'skills/b/SKILL.md': skill('b') }) } });
+    await s.write({ r: gh('r', { ref: SHA1 }) });
+    const engine = createEngine(s.ctx);
+    const c1 = await engine.catalog();
+    expect(await engine.catalog()).toBe(c1);
+    await s.write({ r: gh('r', { ref: SHA1 }), q: gh('q', { ref: SHA1 }) });
+    const c2 = await engine.catalog();
+    expect(c2).not.toBe(c1);
+    expect(c2.skills.map((x) => x.id)).toEqual(['a', 'b']);
+    expect((await engine.registries()).registries.map((v) => v.name)).toEqual(['r', 'q']);
+    expect(await engine.catalog()).toBe(c2);
+    // same size, new mtime: still a change
+    await utimes(s.path, new Date(2001, 0, 1), new Date(2001, 0, 1));
+    expect(await engine.catalog()).not.toBe(c2);
+  });
+
+  it('a sync (forced load) in another process reloads this engine; the syncing engine keeps its own result', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await s.write({ r: gh('r', { ref: SHA1 }) });
+    const server = createEngine(s.ctx);
+    const cli = createEngine(s.ctx);
+    const c1 = await server.catalog();
+    expect(await server.catalog()).toBe(c1);
+    const synced = await cli.catalog({ force: true });
+    expect(await cli.catalog()).toBe(synced);
+    const c2 = await server.catalog();
+    expect(c2).not.toBe(c1);
+    expect(await server.catalog()).toBe(c2);
+  });
+
+  it('a load with an error-level problem is retried after 60s even when the TTL is longer', async () => {
+    const s = await setup({ repos: { 'o/ok': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await s.write({ bad: gh('nope', { ref: SHA2 }), ok: gh('ok', { ref: SHA1 }) }, { ttl_seconds: 3600 });
+    const engine = createEngine(s.ctx);
+    const c1 = await engine.catalog();
+    expect(c1.problems.some((p) => p.level === 'error' && p.registry === 'bad')).toBe(true);
+    s.advance(59_000);
+    expect(await engine.catalog()).toBe(c1);
+    s.advance(1_000);
+    expect(await engine.catalog()).not.toBe(c1);
+  });
+
+  it('a clean SHA-pinned load is not capped at 60s', async () => {
+    const s = await setup({ repos: { 'o/ok': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await s.write({ ok: gh('ok', { ref: SHA1 }) });
+    const engine = createEngine(s.ctx);
+    const c1 = await engine.catalog();
+    s.advance(120_000);
+    expect(await engine.catalog()).toBe(c1);
+  });
+
+  it('concurrent callers after an expiry share one reload', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await s.write({ r: gh('r') }, { ttl_seconds: 60 });
+    const engine = createEngine(s.ctx);
+    const c1 = await engine.catalog();
+    s.advance(61_000);
+    const [a, b] = await Promise.all([engine.catalog(), engine.catalog()]);
+    expect(a).not.toBe(c1);
+    expect(b).toBe(a);
   });
 
   it('memo expiry is anchored at load completion, not load start', async () => {

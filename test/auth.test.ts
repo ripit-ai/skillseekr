@@ -81,6 +81,27 @@ describe('authHeaders', () => {
     expect(calls.n).toBe(1);
   });
 
+  it('gh_cli does not keep a failure: after 30s it asks gh again and picks up a new login', async () => {
+    let now = 0;
+    let loggedIn = false;
+    const calls = { n: 0 };
+    const exec: Exec = async () => {
+      calls.n++;
+      return loggedIn ? { code: 0, stdout: 'fresh\n', stderr: '' } : { code: 1, stdout: '', stderr: 'not logged in' };
+    };
+    const ctx = { ...mk({}, exec), now: () => now };
+    expect((await authHeaders({ type: 'gh_cli' }, gh, trusted, ctx)).problem?.code).toBe('auth/gh-unavailable');
+    loggedIn = true; // the user runs "gh auth login"
+    now = 29_999;
+    expect((await authHeaders({ type: 'gh_cli' }, gh, trusted, ctx)).headers).toEqual({});
+    expect(calls.n).toBe(1);
+    now = 30_000;
+    expect((await authHeaders({ type: 'gh_cli' }, gh, trusted, ctx)).headers).toEqual({ Authorization: 'Bearer fresh' });
+    now = 10_000_000; // a success stays cached
+    expect((await authHeaders({ type: 'gh_cli' }, gh, trusted, ctx)).headers).toEqual({ Authorization: 'Bearer fresh' });
+    expect(calls.n).toBe(2);
+  });
+
   it('gh_cli treats empty output as unavailable', async () => {
     const r = await authHeaders({ type: 'gh_cli' }, gh, trusted, mk({}, async () => ({ code: 0, stdout: '\n', stderr: '' })));
     expect(r.problem?.code).toBe('auth/gh-unavailable');

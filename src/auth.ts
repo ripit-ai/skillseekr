@@ -5,17 +5,29 @@ export interface AuthResult { headers: Record<string, string>; problem?: Problem
 
 const GH_TOKEN_TIMEOUT_MS = 5000;
 
-// Per process. A failure is cached too (as null) so gh isn't re-spawned on every call.
-let ghToken: Promise<string | null> | undefined;
+/** How long a failed "gh auth token" is remembered before gh is asked again (e.g. after "gh auth login"). */
+export const GH_FAILURE_RETRY_MS = 30_000;
+
+// Per process. A token is kept for the process's life; a failure only for GH_FAILURE_RETRY_MS (by ctx.now()),
+// so a long-lived MCP server picks up a later "gh auth login" without being restarted.
+interface GhTokenEntry { promise: Promise<string | null>; failedAt?: number }
+let ghToken: GhTokenEntry | undefined;
 
 export function resetGhTokenCache(): void { ghToken = undefined; }
 
 function loadGhToken(ctx: Ctx): Promise<string | null> {
-  ghToken ??= ctx.exec('gh', ['auth', 'token'], { timeoutMs: GH_TOKEN_TIMEOUT_MS }).then(
+  if (ghToken?.failedAt !== undefined && ctx.now() - ghToken.failedAt >= GH_FAILURE_RETRY_MS) ghToken = undefined;
+  if (ghToken) return ghToken.promise;
+  const entry: GhTokenEntry = { promise: Promise.resolve(null) };
+  entry.promise = ctx.exec('gh', ['auth', 'token'], { timeoutMs: GH_TOKEN_TIMEOUT_MS }).then(
     (r) => (r.code === 0 && r.stdout.trim() ? r.stdout.trim() : null),
     () => null,
-  );
-  return ghToken;
+  ).then((token) => {
+    if (token === null) entry.failedAt = ctx.now();
+    return token;
+  });
+  ghToken = entry;
+  return entry.promise;
 }
 
 const fail = (level: Problem['level'], code: string, message: string): AuthResult =>
