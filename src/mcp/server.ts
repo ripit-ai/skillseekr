@@ -141,8 +141,7 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
   return server;
 }
 
-export async function runStdio(): Promise<void> {
-  const ctx = defaultContext();
+export async function runStdio(ctx: Ctx = defaultContext()): Promise<void> {
   const server = createMcpServer(createEngine(ctx), ctx);
   await server.connect(new StdioServerTransport());
 }
