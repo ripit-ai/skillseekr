@@ -1,7 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile, readdir } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fetchHttpText, materializeHttpSkill } from '../../src/sources/http.js';
 import type { FetchOpts } from '../../src/sources/github.js';
@@ -9,6 +9,13 @@ import type { Ctx } from '../../src/context.js';
 import type { Auth, CacheSettings } from '../../src/types.js';
 import { fakeHttp, type FakeRoute } from '../helpers/fakeHttp.js';
 import { tmpDir } from '../helpers/tmp.js';
+
+// Records every file written through node:fs/promises so a test can see where temp files go.
+const written = vi.hoisted(() => [] as string[]);
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...real, writeFile: ((path: string, ...rest: unknown[]) => { written.push(String(path)); return (real.writeFile as (...a: unknown[]) => unknown)(path, ...rest); }) as typeof real.writeFile };
+});
 
 const URL1 = 'https://example.test/skills/foo/SKILL.md';
 const BODY = '---\nname: foo\n---\nbody\n';
@@ -155,18 +162,30 @@ describe('materializeHttpSkill', () => {
     expect(t.fake.calls[0].headers.Authorization).toBeUndefined();
   });
 
-  it('names the unset env var on a no-cache 401 and leaves no temp file in the skill root', async () => {
+  it('names the unset env var on a no-cache 401', async () => {
     const t = await setup({ [URL1]: { body: BODY, requireAuth: 'Bearer tok' } });
     const auth: Auth = { type: 'bearer', env_var: 'BEARER_X' };
     const r = await materializeHttpSkill(entry(auth), opts(), t.cache, t.ctx);
     expect('error' in r && r.error.code).toBe('source/no-access');
     expect('error' in r && r.error.message).toContain('BEARER_X');
     expect('error' in r && r.error.message).toContain(URL1);
-    t.ctx.env.BEARER_X = 'tok';
-    const ok = await materializeHttpSkill(entry(auth), opts(), t.cache, t.ctx);
-    if ('error' in ok) throw new Error(ok.error.message);
-    expect(await readdir(ok.root)).toEqual(['SKILL.md']);
-    expect((await readdir(join(t.cache.dir, 'http', hash(URL1)))).sort()).toEqual(['foo']);
+  });
+
+  it('never writes a temp file inside the skill root, and cache-error names the auth cause', async () => {
+    const t = await setup({ [URL1]: { body: BODY } });
+    const root = join(t.cache.dir, 'http', hash(URL1), 'foo');
+    // A non-empty directory where SKILL.md should go makes the final rename fail.
+    await mkdir(join(root, 'SKILL.md'), { recursive: true });
+    await writeFile(join(root, 'SKILL.md', 'blocker'), 'x');
+    written.length = 0;
+    const r = await materializeHttpSkill(entry({ type: 'bearer', env_var: 'BEARER_X' }), opts(), t.cache, t.ctx);
+    expect('error' in r && r.error.code).toBe('source/cache-error');
+    expect('error' in r && r.error.message).toContain('BEARER_X');
+    const tmpWrites = written.filter((p) => p.includes('.tmp-'));
+    expect(tmpWrites.length).toBeGreaterThan(0);
+    expect(tmpWrites.filter((p) => p.startsWith(root))).toEqual([]);
+    expect(await readdir(root)).toEqual(['SKILL.md']);
+    expect(await readdir(join(t.cache.dir, 'http', hash(URL1)))).toEqual(['foo']);
   });
 
   it('rejects unsafe skill_name values with source/invalid and no I/O', async () => {

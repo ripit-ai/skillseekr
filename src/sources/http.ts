@@ -18,6 +18,12 @@ const fail = (code: string, message: string): Failure => ({ error: errorProblem(
 const cleanup = (p: string) => rm(p, { force: true, maxRetries: 3 }).catch(() => {});
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
+/** " (auth: ...)" naming why auth failed (missing env var, untrusted entry), or "" when auth was fine (R10). */
+const authCause = (problems: Problem[]): string => {
+  const a = problems.filter((p) => p.code.startsWith('auth/'));
+  return a.length ? ` (auth: ${a.map((p) => p.message).join('; ')})` : '';
+};
+
 /** skill_name becomes a directory name, so it can never be empty, "." / "..", or hold a separator or NUL. */
 function invalidSkillName(name: string): Problem | undefined {
   if (!name || name === '.' || name === '..' || /[/\\\0]/.test(name)) {
@@ -72,8 +78,7 @@ async function fetchCached(
   const useStale = (why: Failure) => {
     if (!prev) {
       // Surface why auth failed (missing env var, untrusted entry) when there is no cache to fall back to (R10).
-      if (!problems.length) return why;
-      return fail(why.error.code, `${why.error.message} (auth: ${problems.map((p) => p.message).join('; ')})`);
+      return fail(why.error.code, `${why.error.message}${authCause(problems)}`);
     }
     problems.push({
       level: 'warning', code: 'source/stale',
@@ -125,7 +130,7 @@ export async function materializeHttpSkill(
   const root = join(cache.dir, 'http', sha256(e.url), e.skill_name);
   const r = await fetchCached(e, join(root, 'SKILL.md'), dirname(root), opts, cache, ctx);
   if ('error' in r) return r;
-  if (!r.cached) return { error: errorProblem('source/cache-error', `cannot write the cache for ${e.url}: ${r.problems.at(-1)?.message ?? 'unknown error'}`) };
+  if (!r.cached) return { error: errorProblem('source/cache-error', `cannot write the cache for ${e.url}: ${r.problems.at(-1)?.message ?? 'unknown error'}${authCause(r.problems)}`) };
   return { root, stale: r.stale, problems: r.problems };
 }
 

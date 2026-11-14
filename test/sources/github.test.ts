@@ -494,7 +494,7 @@ describe('review fixes (R8 stale on any failure, R9 lazy auth and extraction cap
 });
 
 describe('auth cause on errors', () => {
-  it('names the unset env var when a no-cache failure follows an auth problem', async () => {
+  it('names the unset env var when a no-cache 404 follows an auth problem (GitHub answers 404 for a private repo without access)', async () => {
     const t = await setup({ token: 'secret' });
     const r = await materializeGithub(src('main', { type: 'bearer', env_var: 'BEARER_X' }), opts(), t.cache, t.ctx);
     expect('error' in r && r.error.code).toBe('source/no-access');
