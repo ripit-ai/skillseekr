@@ -188,4 +188,30 @@ describe('engine', () => {
     expect(r.registries.every((v) => v.overriddenBy === undefined)).toBe(true);
     expect((await engine.catalog()).overrides.some((o) => o.kind === 'skill' && o.key === 'x')).toBe(true);
   });
+
+  it('an unexpected throw during load becomes engine/load-failed with an empty catalog, never a rejection', async () => {
+    const s = await setup({});
+    const bad = { ...s.ctx, env: new Proxy({}, { get() { throw new Error('boom'); } }) as Ctx['env'] };
+    const engine = createEngine(bad);
+    const cat = await engine.catalog();
+    expect(cat.skills).toEqual([]);
+    expect(cat.problems).toHaveLength(1);
+    expect(cat.problems[0]).toMatchObject({ level: 'error', code: 'engine/load-failed' });
+    expect(cat.problems[0]!.message).toContain('boom');
+    const r = await engine.registries();
+    expect(r.registries).toEqual([]);
+    expect(r.problems[0]!.code).toBe('engine/load-failed');
+  });
+
+  it('memo expiry is anchored at load completion, not load start', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await s.write({ r: gh('r') }, { ttl_seconds: 60 });
+    const slow: Ctx = { ...s.ctx, http: { get: async (...a) => { s.advance(50_000); return s.ctx.http.get(...a); } } };
+    const engine = createEngine(slow);
+    const c1 = await engine.catalog();
+    s.advance(30_000); // 80s after start, but only 30s after completion
+    expect(await engine.catalog()).toBe(c1);
+    s.advance(31_000);
+    expect(await engine.catalog()).not.toBe(c1);
+  });
 });

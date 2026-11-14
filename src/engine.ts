@@ -6,7 +6,7 @@ import { Catalog } from './catalog/catalog.js';
 import { discoverSkills, type DiscoveredSkill } from './catalog/discover.js';
 import { loadConfig } from './config/load.js';
 import { readState } from './cache/state.js';
-import { resolve, type IncludeInfo, type Override, type ResolvedRegistry } from './resolve/resolve.js';
+import { resolve, ttlFor, type IncludeInfo, type Override, type ResolvedRegistry } from './resolve/resolve.js';
 import { isShaRef, materializeGithub, type FetchOpts } from './sources/github.js';
 import { materializeHttpSkill } from './sources/http.js';
 import type { CacheSettings, Config, Problem, SourceEntry } from './types.js';
@@ -70,7 +70,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
     const attach = (p: Problem): Problem => ({ ...p, registry: reg.name, via: reg.via });
     const fo: FetchOpts = {
       force, trusted: reg.trusted,
-      ttlSeconds: config.cache.enabled && entry.cache_enabled ? config.cache.ttlSeconds : 0,
+      ttlSeconds: ttlFor(config, entry),
     };
     const problems: Problem[] = [];
     let skills: DiscoveredSkill[] = [];
@@ -113,8 +113,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
     return { reg, sha, stale, skills, problems, cacheAgeSeconds, ttl: fo.ttlSeconds, recheck };
   }
 
-  async function load(force: boolean): Promise<Loaded> {
-    const startedAt = ctx.now();
+  async function loadInner(force: boolean): Promise<Loaded> {
     const config = await loadConfig(ctx);
     const res = await resolve(config, { force }, ctx);
     const results = await Promise.all(res.registries.map((r) => loadOne(r, config, force)));
@@ -149,12 +148,23 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
     });
 
     // The memo lasts until the earliest re-check of any non-SHA github source, http source or include.
-    const ttlOf = (entry: { cache_enabled: boolean }) => (config.cache.enabled && entry.cache_enabled ? config.cache.ttlSeconds : 0);
     const ttls = results.filter((r) => r.recheck).map((r) => r.ttl);
-    for (const i of res.includes) if (i.entry.type === 'http-registry' || !isShaRef(i.entry.ref)) ttls.push(ttlOf(i.entry));
-    let expiresAt = ttls.length ? startedAt + Math.min(...ttls) * 1000 : Infinity;
-    if (!config.exists) expiresAt = startedAt; // setup may create the config at any moment
+    for (const i of res.includes) if (i.entry.type === 'http-registry' || !isShaRef(i.entry.ref)) ttls.push(ttlFor(config, i.entry));
+    const doneAt = ctx.now(); // anchored at load completion, not start
+    let expiresAt = ttls.length ? doneAt + Math.min(...ttls) * 1000 : Infinity;
+    if (!config.exists) expiresAt = doneAt; // setup may create the config at any moment
     return { catalog, views, includes: res.includes, overrides: res.overrides, problems, expiresAt };
+  }
+
+  async function load(force: boolean): Promise<Loaded> {
+    try {
+      return await loadInner(force);
+    } catch (e) {
+      const problems: Problem[] = [{ level: 'error', code: 'engine/load-failed', message: `loading the catalog failed unexpectedly: ${msg(e)}` }];
+      let now = 0;
+      try { now = ctx.now(); } catch { /* keep 0 */ }
+      return { catalog: new Catalog([], [], problems, false), views: [], includes: [], overrides: [], problems, expiresAt: now };
+    }
   }
 
   function get(force: boolean): Promise<Loaded> {
@@ -166,7 +176,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
     const entry: NonNullable<typeof memo> = { promise: undefined as unknown as Promise<Loaded>, startedAt: now };
     entry.promise = load(force).then(
       (l) => { entry.done = l; return l; },
-      (e) => { if (memo === entry) memo = undefined; throw e; },
+      (e) => { if (memo === entry) memo = undefined; throw e; }, // unreachable: load() never rejects
     );
     memo = entry;
     return entry.promise;

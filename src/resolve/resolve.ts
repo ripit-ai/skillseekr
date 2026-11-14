@@ -9,6 +9,10 @@ export interface Override { kind: 'registry' | 'skill'; key: string; replaced: {
 export interface IncludeInfo { name: string; via: string[]; entry: IncludeEntry; sha?: string; stale: boolean; policy: boolean /* entry.policy && depth===1 */ }
 export interface Resolution { registries: ResolvedRegistry[]; includes: IncludeInfo[]; overrides: Override[]; problems: Problem[]; stale: boolean }
 
+/** Effective TTL for one registry: 0 (re-check every load) when caching is off globally or for the entry. */
+export const ttlFor = (config: Pick<Config, 'cache'>, entry: { cache_enabled: boolean }): number =>
+  config.cache.enabled && entry.cache_enabled ? config.cache.ttlSeconds : 0;
+
 /** The local config is depth 0; an include entry whose file would be deeper than this is skipped. */
 export const MAX_INCLUDE_DEPTH = 5;
 
@@ -47,8 +51,7 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
 
   const fetchInclude = (entry: IncludeEntry, trusted: boolean): Promise<Fetched> => {
     const fo: FetchOpts = {
-      force: opts.force, trusted,
-      ttlSeconds: config.cache.enabled && entry.cache_enabled ? config.cache.ttlSeconds : 0,
+      force: opts.force, trusted, ttlSeconds: ttlFor(config, entry),
     };
     return entry.type === 'github-registry'
       ? readGithubFile(entry, fo, config.cache, ctx)
