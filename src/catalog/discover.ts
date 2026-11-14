@@ -37,9 +37,18 @@ export async function discoverSkills(treeRoot: string, skillsDir: string): Promi
 
   const found: DiscoveredSkill[] = [];
   async function walk(abs: string, rel: string): Promise<void> {
-    const entries = await readdir(abs, { withFileTypes: true });
+    let entries;
+    try {
+      entries = await readdir(abs, { withFileTypes: true });
+    } catch {
+      return; // unreadable or vanished directory: skip it, keep going
+    }
     if (rel !== '' && entries.some((e) => e.isFile() && e.name === 'SKILL.md')) {
-      found.push(await build(abs, rel));
+      try {
+        found.push(await build(abs, rel));
+      } catch {
+        // unreadable SKILL.md or file vanished mid-walk: skip this skill
+      }
       return; // prune: shallowest wins
     }
     for (const e of entries) {
@@ -59,8 +68,8 @@ async function build(dir: string, id: string): Promise<DiscoveredSkill> {
   if (!fm.ok) {
     warnings.push('missing frontmatter');
   } else {
-    const n = fm.data.name;
-    if (typeof n === 'string' && n.trim() !== '') {
+    const n = typeof fm.data.name === 'string' ? fm.data.name.trim() : '';
+    if (n !== '') {
       name = n;
       if (n !== folder) warnings.push(`name mismatch: frontmatter name "${n}" does not match folder "${folder}"`);
     } else {
@@ -68,7 +77,7 @@ async function build(dir: string, id: string): Promise<DiscoveredSkill> {
     }
   }
   if (fm.ok) {
-    if (typeof fm.data.description === 'string') description = fm.data.description;
+    if (typeof fm.data.description === 'string' && fm.data.description.trim() !== '') description = fm.data.description;
     else warnings.push('missing description in frontmatter');
   }
   const { hash, files } = await contentHash(dir);

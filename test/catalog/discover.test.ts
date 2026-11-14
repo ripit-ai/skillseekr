@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { mkdir, writeFile, symlink, cp } from 'node:fs/promises';
+import { describe, it, expect, vi } from 'vitest';
+import { mkdir, writeFile, symlink, cp, chmod } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { discoverSkills } from '../../src/catalog/discover.js';
 import { tmpDir } from '../helpers/tmp.js';
@@ -113,5 +113,42 @@ describe('discoverSkills', () => {
     await cp(join(FX, 'nested'), root, { recursive: true });
     const got = await ids(root, '');
     expect(got).toEqual([...got].sort());
+  });
+  it.skipIf(process.getuid?.() === 0)('an unreadable SKILL.md or dir skips only that skill', async () => {
+    const root = await tmpDir();
+    await put(root, 's/good/SKILL.md', skillMd('good'));
+    await put(root, 's/bad/SKILL.md', skillMd('bad'));
+    await put(root, 's/locked/deep/SKILL.md', skillMd('deep'));
+    await chmod(join(root, 's/bad/SKILL.md'), 0o000);
+    await chmod(join(root, 's/locked'), 0o000);
+    try {
+      expect(await ids(root, 's')).toEqual(['good']);
+    } finally {
+      await chmod(join(root, 's/locked'), 0o755);
+      await chmod(join(root, 's/bad/SKILL.md'), 0o644);
+    }
+  });
+  it('odd YAML tags never write warnings', async () => {
+    const root = await tmpDir();
+    await put(root, 's/a/SKILL.md', '---\nname: !foo bar\ndescription: d\n---\n');
+    const emit = vi.spyOn(process, 'emitWarning').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const err = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const [s] = await discoverSkills(root, 's');
+      expect(s!.id).toBe('a');
+      expect(emit).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+      expect(err).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+  it('blank description warns like a missing one; name is trimmed', async () => {
+    const root = await tmpDir();
+    await put(root, 's/a/SKILL.md', '---\nname: "  a  "\ndescription: "   "\n---\n');
+    const [s] = await discoverSkills(root, 's');
+    expect(s).toMatchObject({ name: 'a', description: '' });
+    expect(s!.warnings).toEqual(['missing description in frontmatter']);
   });
 });
