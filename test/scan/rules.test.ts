@@ -42,6 +42,47 @@ describe('rule table', () => {
     for (const r of RULES) expect(r.re.flags).not.toMatch(/[gy]/);
   });
 
+  it('no lookaround can cross a newline (no \\s, no newline-matching class inside (?=, (?!, (?<=, (?<!)', () => {
+    // The scanner pre-tests blocks of joined lines; a lookaround that sees the next line can hide a match.
+    const offenders: string[] = [];
+    for (const r of RULES) {
+      const src = r.re.source;
+      const stack: boolean[] = []; // per open group: is it a lookaround?
+      const inLook = () => stack.includes(true);
+      for (let i = 0; i < src.length; i++) {
+        const c = src[i]!;
+        if (c === '\\') {
+          if (src[i + 1] === 's' && inLook()) offenders.push(`${r.id}: \\s at ${i}`);
+          i++;
+          continue;
+        }
+        if (c === '[') {
+          let j = i + 1;
+          const negated = src[j] === '^';
+          let body = '';
+          for (; j < src.length && src[j] !== ']'; j++) { if (src[j] === '\\') { body += src[j]! + src[j + 1]!; j++; } else body += src[j]!; }
+          if (inLook()) {
+            const excludesNewline = body.includes('\\n') || body.includes('\\s');
+            if (negated ? !excludesNewline : body.includes('\\s') || body.includes('\\n')) offenders.push(`${r.id}: class [${negated ? '^' : ''}${body}] at ${i}`);
+          }
+          i = j;
+          continue;
+        }
+        if (c === '(') stack.push(/^\(\?<?[=!]/.test(src.slice(i, i + 4)));
+        else if (c === ')') stack.pop();
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('every rule except the single-character-class ones has lowercase needles', () => {
+    for (const r of RULES) {
+      if (r.target === 'frontmatter' || r.id === 'hidden-unicode/bidi-or-tag' || r.id === 'zero-width/invisible-char') continue;
+      expect(r.needles?.length, r.id).toBeGreaterThan(0);
+      for (const n of r.needles!) expect(n, r.id).toBe(n.toLowerCase());
+    }
+  });
+
   it('secrets, hidden unicode and only those are never downgraded', () => {
     expect(neverDowngrade.map((r) => r.id).sort()).toEqual([
       'hidden-unicode/bidi-or-tag', 'secrets/ai-key', 'secrets/aws-key', 'secrets/github-token', 'secrets/private-key', 'secrets/slack-token',

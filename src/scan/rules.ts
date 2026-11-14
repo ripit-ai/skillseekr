@@ -20,7 +20,7 @@ export interface Rule {
   severity: 'critical' | 'warning';
   target: Target;
   /**
-   * Tested against one logical line, in windows of at most 4096 characters. Never global or sticky. Lookarounds
+   * Tested against one whole logical line. Never global or sticky. Lookarounds
    * and negated classes must not cross a newline: the scanner pre-tests blocks of joined lines with the `m` flag.
    * A named group starting with `hit`, when present, is the reported match; it must end where the match ends.
    * Must run in linear time: see the shapes below.
@@ -28,29 +28,70 @@ export interface Rule {
   re: RegExp;
   message: string;
   neverDowngrade?: boolean;
+  /**
+   * Lowercase literals of which every match contains at least one. The scanner skips the regex for a block of
+   * lines that holds none of them. Omitted for rules whose regex is a single character class.
+   */
+  needles?: readonly string[];
 }
+
+const re = (source: string, flags = '') => new RegExp(source, flags);
+const any = (...alternatives: string[]) => alternatives.join('|');
 
 // Linear-time shapes. Upstream's `A[^\n]*B` rescans the rest of the line from every A, which is quadratic on a
 // line full of A. `^(?=(?<pre>[^\n]*?)A)\k<pre>(?<hit>A…B)` pins the first A instead: if B doesn't follow the
 // first A, it follows no later one either. `(?:^|\))(?=(?<pre>[^)\n]*?)A)…` does the same per segment when B
 // must stay inside a segment. Each group name may appear once per regex, hence the suffixes.
-const firstThen = (n: string, a: string, rest: string) => `^(?=(?<pre${n}>[^\\n]*?)${a})\\k<pre${n}>(?<hit${n}>${a}${rest})`;
+//
+// Lookarounds never cross a newline (they use `[^\S\n]`, not `\s`): the scanner pre-tests blocks of joined lines,
+// and a negative lookahead that saw the next line could hide a match (rules.test.ts walks every source for this).
+/** `\s` outside character classes becomes `[^\S\n]`. (A negated class with `\s` already excludes the newline.) */
+function lineLocal(src: string): string {
+  let out = '';
+  let inClass = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === '\\') {
+      const e = src.slice(i, i + 2);
+      out += e === '\\s' && !inClass ? String.raw`[^\S\n]` : e;
+      i++;
+    } else {
+      if (c === '[') inClass = true;
+      else if (c === ']') inClass = false;
+      out += c;
+    }
+  }
+  return out;
+}
+const firstThen = (n: string, a: string, rest: string) => `^(?=(?<pre${n}>[^\\n]*?)${lineLocal(a)})\\k<pre${n}>(?<hit${n}>${a}${rest})`;
+const H = String.raw`[^\S\n]`; // horizontal whitespace, for lookarounds
 
 const DL = String.raw`\b(?:curl|wget)(?:\.exe)?\b`;
-const PIPE = String.raw`(?<!\|)\|(?!\|)\s*`;
-/** What a download can be piped into to run it. Interpreters given code on the command line (-c/-e/-m) read stdin as data. */
-const SHELL = String.raw`(?:sudo(?:\s+-\S+)*\s+)?(?:(?:\/usr)?\/bin\/|\/usr\/bin\/env\s+|env\s+)?(?:(?:ba|z|da|k)?sh\b(?!\s+-c\b)|python[23]?\b(?!\s+-[cm]\b)|node\b(?!\s+-[ep]\b)|perl\b(?!\s+-\w*e)|ruby\b(?!\s+-e\b)|\$\{?SHELL\b)`;
+/** A pipe (`|` or `|&`, not `||`). */
+const PIPE = String.raw`(?<!\|)\|(?!\|)&?\s*`;
+/** Commands that run the rest of the line: sudo/doas with their flags, and wrappers such as timeout, nice, env. */
+const RUNNER = String.raw`(?:(?:sudo|doas)(?:\s+(?:--?[\w-]+(?:=\S+)?)(?:\s+(?!-)\S+(?=[^\S\n]))?)*\s+|timeout(?:\s+-\S+)*\s+\S+\s+|nice(?:\s+-n\s*\S+|\s+-\d+)?\s+|nohup\s+|stdbuf(?:\s+-\S+)+\s+|xargs(?:\s+-\S+)*\s+|(?:\/usr\/bin\/)?env(?:\s+-\S+)*(?:\s+\w+=\S*)*\s+)*`;
+const INTERP = String.raw`(?:(?:ba|z|da|k)?sh|python[23]?|node|perl|ruby)`;
+/**
+ * What a download can be piped into to run it. An interpreter given code on its command line (-c/-e/-p) reads
+ * stdin as data, unless that code runs stdin (exec, eval, stdin, read, sh, source, or a lone `-`); `-m` is data.
+ */
+const SHELL = String.raw`(?:tee\b[^|\n]*?>\(\s*)?${RUNNER}(?:(?:\/usr)?\/bin\/)?(?:${INTERP}${H}+-\w*[cep]\b[^|\n]*?(?:exec|eval|stdin|read|\bsh\b|\bsource\b|${H}-(?![\w-]))|(?:ba|z|da|k)?sh\b(?!${H}+-c\b)|python[23]?\b(?!${H}+-[cm]\b)|node\b(?!${H}+-[ep]\b)|perl\b(?!${H}+-\w*e)|ruby\b(?!${H}+-e\b)|\$\{?SHELL\b)`;
 const PS_DL = String.raw`\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|curl(?:\.exe)?|wget(?:\.exe)?)\b`;
 const IEX = String.raw`\b(?:iex|Invoke-Expression)\b`;
+const SUBST = String.raw`["']?(?:\$\(|\x60)\s*${DL}`; // "$(curl" or `curl
 
 const pipeToShell = (n: string) => firstThen(n, DL, String.raw`[^\n]*?${PIPE}${SHELL}`);
-const substitution = String.raw`(?:\b(?:ba|z|da|k)?sh|\bsource|(?:^|[\s;&|])\.)\s+<\(\s*${DL}|(?:\beval|\b(?:ba|z|da|k)?sh\s+-c|\bpython[23]?\s+-c|\$\{?SHELL\}?\s+-c)\s*["']?(?:\$\(|\x60)\s*${DL}`;
+const substitution = any(
+  String.raw`(?:\b${INTERP}|\bsource|(?:^|[\s;&|])\.)\s+<\(\s*${DL}`, // bash <(curl …), python3 <(curl …), . <(curl …)
+  String.raw`(?:\beval|\b(?:ba|z|da|k)?sh\s+-c|\bpython[23]?\s+-c|\$\{?SHELL\}?\s+-c)\s*${SUBST}`, // eval "$(curl …)"
+  String.raw`(?:\b(?:ba|z|da|k)?sh|\$\{?SHELL\}?)\s*<<<\s*${SUBST}`, // bash <<< "$(curl …)"
+);
 const iexFirst = (n: string) => firstThen(n, IEX, String.raw`[^\n]*(?:DownloadString|DownloadFile|${PS_DL})`);
 const downloadToIex = (n: string) => firstThen(n, PS_DL, String.raw`[^\n]*?${PIPE}${IEX}`);
+/** The output of a download: `-o FILE`, `-sSLo FILE`, `--output[=]FILE`, `-O`, or a `> FILE` redirect. */
+const OUTPUT = String.raw`(?:\s(?:-[a-z]{0,8}o\b|--output(?:-document)?\b)\s*=?\s*[^\s;&|]|\s>\s*[^\s;&|>])`;
 const HEREDOC = String.raw`(?:\b(?:ba|z|da|k)?sh|\bpython[23]?|\$\{?SHELL\}?)\s*<<-?\s*["']?[\w.-]+`;
-
-const re = (source: string, flags = '') => new RegExp(source, flags);
-const any = (...alternatives: string[]) => alternatives.join('|');
 
 const HOME = String.raw`(?:~|\$HOME|\$\{HOME\}|\$env:(?:HOME|USERPROFILE)|%USERPROFILE%|expanduser\(|homedir\(\)|Path\.home\(\)|os\.environ(?:\.get\(|\[)\s*["']HOME|getenv\(\s*["']HOME|\/Users\/[^\/\s]+\/|\/home\/[^\/\s]+\/|\/root\/)`;
 const SEP = String.raw`(?:\/|["'\x60]\s*[,/+]\s*["'\x60])`; // `/`, or the gap between path parts given as separate strings
@@ -63,11 +104,11 @@ const DECODE = String.raw`\bbase64\s+(?:-d|-D|--decode)\b`;
 // Shell commands are matched case-insensitively: macOS file systems run `CURL` as `curl`.
 export const RULES: readonly Rule[] = [
   // Prompt injection and concealment (instruction text).
-  { id: 'prompt-injection/override-instructions', severity: 'critical', target: 'text', message: "tries to override the agent's instructions",
+  { id: 'prompt-injection/override-instructions', needles: ['ignore', 'disregard', 'forget'], severity: 'critical', target: 'text', message: "tries to override the agent's instructions",
     re: /\b(?:ignore|disregard|forget)\s+(?:(?:all|any)\s+)?(?:of\s+)?(?:(?:the|your|my|these|those|its)\s+)?(?:previous|prior|earlier|above|preceding|system)\s+(?:instructions?|prompts?|rules|directions)\b/i },
-  { id: 'prompt-injection/role-impersonation', severity: 'critical', target: 'text', message: 'impersonates a system prompt or a jailbroken mode',
-    re: /^\s*(?:>\s*)*(?:<\|system\|>|<\|im_start\|>\s*system\b|\[system\]|system\s+prompt\s*:|#{1,6}\s*system\b[\s:]*$)|\byou\s+are\s+now\s+(?:in\s+)?(?:developer\s+mode|DAN\b|jailbroken)/i },
-  { id: 'concealment/hide-from-user', severity: 'critical', target: 'text', message: 'asks the agent to hide actions from the user',
+  { id: 'prompt-injection/role-impersonation', needles: ['system', 'you'], severity: 'critical', target: 'text', message: 'impersonates a system prompt or a jailbroken mode',
+    re: /^\s*(?:>\s*)*(?:<\|system\|>|<\|im_start\|>\s*system\b|\[system\]|system\s+prompt\s*:|#{1,6}\s*system(?:\s+(?:prompt|message))?\b[\s:]*$)|\byou\s+are\s+now\s+(?:in\s+)?(?:developer\s+mode|DAN\b|jailbroken)/i },
+  { id: 'concealment/hide-from-user', needles: ['user'], severity: 'critical', target: 'text', message: 'asks the agent to hide actions from the user',
     re: /\b(?:do\s+not|don't|never)\s+(?:tell|inform|let)\s+the\s+user\s+(?:that\s+you|about\b|know)\b|\b(?:do\s+not|don't|never)\s+(?:tell|inform)\s+the\s+user\s*(?:[.!,;]|$)|\bwithout\s+(?:telling|informing|notifying)\s+the\s+user\b|\b(?:hide|conceal|keep)\s+(?:this|it|these\s+\w+)\s+(?:secret\s+)?from\s+the\s+user\b/i },
 
   // Invisible characters and secrets (everywhere).
@@ -76,76 +117,73 @@ export const RULES: readonly Rule[] = [
   // A BOM at file offset 0 is removed before scanning, so any BOM left is mid-file. U+200D (emoji joiner) is fine.
   { id: 'zero-width/invisible-char', severity: 'warning', target: 'all', message: 'zero-width characters',
     re: /[\u{200B}\u{200C}\u{2060}-\u{2064}\u{FEFF}]/u },
-  { id: 'secrets/private-key', severity: 'critical', target: 'all', neverDowngrade: true, message: 'embedded private key',
+  { id: 'secrets/private-key', needles: ['private key'], severity: 'critical', target: 'all', neverDowngrade: true, message: 'embedded private key',
     re: /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----/ },
   // Keys with "EXAMPLE" in their 16 characters are documentation placeholders (AWS's own docs use them).
-  { id: 'secrets/aws-key', severity: 'critical', target: 'all', neverDowngrade: true, message: 'AWS access key id',
+  { id: 'secrets/aws-key', needles: ['akia', 'asia'], severity: 'critical', target: 'all', neverDowngrade: true, message: 'AWS access key id',
     re: /\b(?:AKIA|ASIA)(?![A-Z0-9]{0,9}EXAMPLE)[A-Z0-9]{16}\b/ },
-  { id: 'secrets/github-token', severity: 'critical', target: 'all', neverDowngrade: true, message: 'GitHub token',
+  { id: 'secrets/github-token', needles: ['ghp_', 'gho_', 'ghs_', 'ghu_', 'github_pat_'], severity: 'critical', target: 'all', neverDowngrade: true, message: 'GitHub token',
     re: /\b(?:ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{30,255}\b/ },
-  { id: 'secrets/slack-token', severity: 'critical', target: 'all', neverDowngrade: true, message: 'Slack token',
+  { id: 'secrets/slack-token', needles: ['xox'], severity: 'critical', target: 'all', neverDowngrade: true, message: 'Slack token',
     re: /\bxox[abpr]-[A-Za-z0-9-]{20,255}\b/ },
-  { id: 'secrets/ai-key', severity: 'critical', target: 'all', neverDowngrade: true, message: 'AI provider API key',
+  { id: 'secrets/ai-key', needles: ['sk-'], severity: 'critical', target: 'all', neverDowngrade: true, message: 'AI provider API key',
     re: /\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{32,512}\b/ },
 
   // Download-and-run and remote code (scripts).
-  { id: 'download-and-run/curl-pipe-shell', severity: 'critical', target: 'script', message: 'downloads and runs remote code',
+  { id: 'download-and-run/curl-pipe-shell', needles: ['curl', 'wget'], severity: 'critical', target: 'script', message: 'downloads and runs remote code',
     re: re(pipeToShell(''), 'i') },
-  { id: 'download-and-run/fetch-and-exec', severity: 'critical', target: 'script', message: 'executes a script fetched from the internet at run time',
+  { id: 'download-and-run/fetch-and-exec', needles: ['<(', '$(', '`', 'iex', 'invoke-expression', '<<'], severity: 'critical', target: 'script', message: 'executes a script fetched from the internet at run time',
     re: re(any(substitution, iexFirst(''), downloadToIex('2'), firstThen('3', HEREDOC, String.raw`[^\n]*?${DL}`)), 'i') },
   // Upstream: curl …(-o|-O|--output)\s*\S+…(&&|;)…(sh|python|node|chmod +x|./x): the same steps in order,
   // each pinned to its first occurrence after the previous one. A `>` redirect also counts as the output.
-  { id: 'download-and-run/download-then-run', severity: 'critical', target: 'script', message: 'downloads a file and runs it without verification',
-    re: re(String.raw`^(?=(?<a>[^\n]*?)${DL})\k<a>(?<hit>(?=(?<b>[^\n]*?)(?:\s(?:-[a-z]{0,8}o\b|--output(?:-document)?\b)\s*=?\s*[^\s;&|]|\s>\s*[^\s;&|>]))\k<b>(?=(?<c>[^\n]*?)(?:&&|;))\k<c>[^\n]*?(?:\b(?:ba|z|da|k)?sh\b|\bpython[23]?\b|\bnode\b|\bperl\b|\bruby\b|\bsource\b|\bchmod\s+\+x|\.\/\S|(?:&&|;)\s*(?:sudo\s+)?\/\S))`, 'i') },
-  { id: 'remote-code/remote-package', severity: 'critical', target: 'script', message: 'installs or runs code from a URL or git ref',
+  { id: 'download-and-run/download-then-run', needles: ['curl', 'wget'], severity: 'critical', target: 'script', message: 'downloads a file and runs it without verification',
+    re: re(String.raw`^(?=(?<a>[^\n]*?)${DL})\k<a>(?<hit>(?=(?<b>[^\n]*?)${lineLocal(OUTPUT)})\k<b>(?=(?<c>[^\n]*?)(?:&&|;))\k<c>[^\n]*?(?:\b(?:ba|z|da|k)?sh\b|\bpython[23]?\b|\bnode\b|\bperl\b|\bruby\b|\bsource\b|\bchmod\s+\+x|\.\/\S|(?:&&|;)\s*(?:sudo\s+)?\/\S))`, 'i') },
+  { id: 'remote-code/remote-package', needles: ['npx', 'uvx', 'pip'], severity: 'critical', target: 'script', message: 'installs or runs code from a URL or git ref',
     re: re(any(String.raw`\bnpx\s+(?:(?:-y|--yes|-p|--package=?)\s*)*(?:https?:|git\+|github:)`, String.raw`\buvx\s+(?:--from(?:=|\s+))?(?:git\+|https?:)`,
       String.raw`\bpipx\s+(?:run|install)\s+(?:--spec(?:=|\s+))?(?:git\+|https?:)`, firstThen('', String.raw`\bpip[23]?\s+install\b`, String.raw`[^\n]*?(?:git\+|https?:\/\/)`)), 'i') },
-  { id: 'remote-code/url-import', severity: 'critical', target: 'script', message: 'imports code from a URL at run time',
+  { id: 'remote-code/url-import', needles: ['import(', 'require('], severity: 'critical', target: 'script', message: 'imports code from a URL at run time',
     re: re(any(String.raw`\b(?:import|require)\(\s*['"\x60]https?:`, firstThen('', String.raw`['"\x60]https?:\/\/`, String.raw`[^\n]*?\b(?:import|require)\(\s*[A-Za-z_$]`)), 'i') },
-  { id: 'remote-code/exec-url', severity: 'critical', target: 'script', message: 'executes code fetched from a URL',
-    re: re(String.raw`(?:^|\))(?=(?<pre>[^)\n]*?)${EXEC_CALL})\k<pre>(?<hit>${EXEC_CALL}[^)\n]*(?:urlopen|requests\.get|httpx\.get|urllib\.request|fetch\())`, 'i') },
-  { id: 'encoded-exec/eval-decoded', severity: 'critical', target: 'script', message: 'executes encoded or compressed code',
+  { id: 'remote-code/exec-url', needles: ['exec', 'eval', 'function'], severity: 'critical', target: 'script', message: 'executes code fetched from a URL',
+    re: re(String.raw`(?:^|\))(?=(?<pre>[^)\n]*?)${lineLocal(EXEC_CALL)})\k<pre>(?<hit>${EXEC_CALL}[^)\n]*(?:urlopen|requests\.get|httpx\.get|urllib\.request|fetch\())`, 'i') },
+  { id: 'encoded-exec/eval-decoded', needles: ['eval', 'exec', 'base64'], severity: 'critical', target: 'script', message: 'executes encoded or compressed code',
     re: re(any(String.raw`\b(?:eval|exec)\s*\(\s*(?:[\w.]*\.)?(?:b64decode|b32decode|b16decode|a85decode|b85decode|decodebytes|decodestring|unhexlify|fromhex|decompress|atob|base64|codecs\.decode|Buffer\.from)`,
       firstThen('', DECODE, String.raw`[^\n]*?${PIPE}${SHELL}`), firstThen('2', String.raw`\beval\b`, String.raw`[^\n]*?${DECODE}`))) },
 
   // Credentials and exfiltration (scripts).
-  { id: 'credential-read/home-credentials', severity: 'critical', target: 'script', message: 'reads credential files',
+  { id: 'credential-read/home-credentials', needles: ['.ssh', '.aws', '.netrc', '.docker', '.kube', '.config'], severity: 'critical', target: 'script', message: 'reads credential files',
     re: re(firstThen('', HOME, String.raw`[^\n]*?${CRED}`), 'i') },
-  { id: 'credential-read/keychain', severity: 'critical', target: 'script', message: 'reads secrets from the macOS keychain',
+  { id: 'credential-read/keychain', needles: ['security'], severity: 'critical', target: 'script', message: 'reads secrets from the macOS keychain',
     re: /\bsecurity\s+(?:find-(?:generic|internet)-password|dump-keychain)\b/i },
   // Upstream: (requests.post|urlopen|fetch|curl\s[^\n]*-d)[^\n]*(env). Here any curl/wget that carries a secret
   // variable (body, header or URL), env piped to the network, and getenv of a secret. Outside shell files,
   // `$…TOKEN` doesn't count (see ruleMatch).
-  { id: 'exfiltration/env-to-network', severity: 'critical', target: 'script', message: 'sends environment secrets over the network',
+  { id: 'exfiltration/env-to-network', needles: ['env', '$'], severity: 'critical', target: 'script', message: 'sends environment secrets over the network',
     re: re(any(firstThen('', SENDER, String.raw`[^\n]*${ENV}`), firstThen('2', DL, String.raw`[^\n]*?${ENV}`),
       firstThen('3', String.raw`\b(?:env|printenv)\b\s*${PIPE}`, String.raw`[^\n]*?\b(?:curl|wget|nc|ncat)\b`)), 'i') },
 
   // Instruction text that tells the agent to download and run code. A warning, not a block: the spec scopes
   // download-and-run blocking to scripts, but a skill telling the agent to run `curl … | sh` should be visible.
-  { id: 'download-and-run/instructed', severity: 'warning', target: 'text', message: 'tells the agent to download and run remote code',
+  { id: 'download-and-run/instructed', needles: ['curl', 'wget', 'iex', 'invoke-expression', '<(', '$(', '`'], severity: 'warning', target: 'text', message: 'tells the agent to download and run remote code',
     re: re(any(pipeToShell(''), substitution, iexFirst('2'), downloadToIex('3')), 'i') },
 
   // Permission bypass (instruction text) and broad tool grants (frontmatter).
-  { id: 'permission-bypass/skip-permissions', severity: 'warning', target: 'text', message: 'tells the agent to bypass permission prompts',
+  { id: 'permission-bypass/skip-permissions', needles: ['--dangerously', '--yolo', 'bypasspermissions', 'prompt'], severity: 'warning', target: 'text', message: 'tells the agent to bypass permission prompts',
     re: /--dangerously-skip-permissions|--yolo\b|--dangerously-bypass-approvals|\bbypassPermissions\b|\b(?:turn\s+off|disable)\s+(?:the\s+|all\s+)?(?:approval|permission)\s+prompts?\b/i },
   { id: 'broad-tools/allowed-tools', severity: 'warning', target: 'frontmatter', message: 'frontmatter grants every tool, unrestricted Bash, or pre-approved commands that fetch or run code',
     re: /^(?:\*|Bash(?:\((?:\*|\*:\*)?\))?|Bash\((?:curl|wget|bash|sh|zsh|eval|ssh|sudo|rm)\b.*)$/ },
 
   // Weaker signals. They come last: a weak finding on a line that a critical rule matched is dropped.
-  { id: 'weak/network-call', severity: 'warning', target: 'script', message: 'makes network calls',
+  { id: 'weak/network-call', needles: ['requests.', 'urllib', 'http.client', 'fetch(', 'axios', 'curl', 'wget', 'socket.socket'], severity: 'warning', target: 'script', message: 'makes network calls',
     re: /\b(?:requests\.(?:get|post|put|delete)|urllib\.request|http\.client|fetch\(|axios|curl\s|wget\s|socket\.socket)/i },
-  { id: 'weak/shell-true', severity: 'warning', target: 'script', message: 'subprocess with shell=True',
+  { id: 'weak/shell-true', needles: ['shell'], severity: 'warning', target: 'script', message: 'subprocess with shell=True',
     re: /(?:^|\))(?=(?<pre>[^)\n]*?)subprocess\.[a-z_]+\()\k<pre>(?<hit>subprocess\.[a-z_]+\([^)\n]*shell\s*=\s*True)/ },
-  { id: 'weak/sudo', severity: 'warning', target: 'script', message: 'uses sudo',
+  { id: 'weak/sudo', needles: ['sudo'], severity: 'warning', target: 'script', message: 'uses sudo',
     re: /(?:^|\s)sudo\s/i },
-  { id: 'weak/broad-rm', severity: 'warning', target: 'script', message: 'recursive delete of a broad path',
+  { id: 'weak/broad-rm', needles: ['rm'], severity: 'warning', target: 'script', message: 'recursive delete of a broad path',
     re: /\brm\s+-[a-z]{0,10}r[a-z]{0,10}\s+(?:\/(?:\s|$)|~\/?(?:\s|$)|\$HOME\/?(?:\s|$)|\*)/i },
-  { id: 'weak/chmod-777', severity: 'warning', target: 'all', message: 'world-writable permissions',
+  { id: 'weak/chmod-777', needles: ['chmod'], severity: 'warning', target: 'all', message: 'world-writable permissions',
     re: /chmod\s+(?:-R\s+)?777\b/ },
 ];
-
-/** Rules whose regex is a single character class: linear on any input, so they are tested on whole lines. */
-export const CHAR_CLASS_RULES: ReadonlySet<string> = new Set(['hidden-unicode/bidi-or-tag', 'zero-width/invisible-char']);
 
 const PROGRAM_FILE = /\.(?:py|js|mjs|cjs|ts)$/i;
 const ENV_OBJECT = /os\.environ|os\.getenv|process\.env/;
@@ -162,6 +200,12 @@ export function ruleMatch(rule: Rule, text: string, file: string): { index: numb
   let hit: string | undefined;
   if (m.groups) for (const k in m.groups) if (k.startsWith('hit') && m.groups[k] !== undefined) { hit = m.groups[k]; break; }
   return hit === undefined ? { index: m.index, length: m[0].length } : { index: m.index + m[0].length - hit.length, length: hit.length };
+}
+
+/** Whether ruleMatch would match, without building the match (for the weak-signal check). */
+export function ruleTest(rule: Rule, text: string, file: string): boolean {
+  if (!rule.re.test(text)) return false;
+  return !(rule.id === 'exfiltration/env-to-network' && PROGRAM_FILE.test(file) && !ENV_OBJECT.test(text));
 }
 
 /** Frontmatter keys whose tools the `frontmatter` rules check. */

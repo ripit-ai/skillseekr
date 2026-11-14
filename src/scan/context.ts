@@ -2,9 +2,11 @@
 // Copyright (c) 2026 Skillyard contributors. See THIRD_PARTY_NOTICES.md.
 // Decides when a critical match only quotes a pattern rather than using it. Each decision has one reason.
 // Changes from upstream: every check is tied to where the match is. A block (fence, docstring, block comment)
-// counts only once it is closed; comments follow each language's syntax; a quotation must enclose the match;
-// a defensive phrase must come before it; a pattern must be inside a regex call's arguments; printing must
-// not be redirected or piped anywhere; and "localhost" must be the only network target on the line.
+// counts only once it is closed; comments and strings follow each language's syntax (Python and JS/TS are
+// lexed; Python docstrings must be bare, never assigned or f-strings); a quotation must enclose the match; a
+// defensive phrase must come before it in the same sentence; a pattern must be a direct string argument of a
+// regex call (Python, JS/TS only); printing must not be redirected or piped anywhere; and "localhost" needs a
+// loopback URL and no other possible target on the line.
 import type { Rule } from './rules.js';
 
 export const REASONS = {
@@ -64,34 +66,68 @@ export function quotedSpans(lines: string[], kind: FileKind, file: string): Map<
     return spans;
   }
   if (JS_FILE.test(file)) { jsComments(lines, add); return spans; }
-  if (PY_FILE.test(file)) pyDocstrings(lines, add);
+  if (PY_FILE.test(file)) { pyStrings(lines, add); return spans; }
   lines.forEach((l, i) => { if (/^\s*#/.test(l)) add(i, WHOLE); });
   return spans;
 }
 
-const PY_DOC_OPEN = /^\s*(?:[\w.]+\s*(?::[^=\n]*)?=\s*)?[rRbBuUfF]{0,2}("""|''')/;
-
-/** Docstrings: a triple quote that starts a statement (optionally after `name =`), up to its closing triple quote. */
-function pyDocstrings(lines: string[], add: (i: number, s: Span) => void): void {
-  const holders: Record<string, number[]> = { '"""': [], "'''": [] };
-  lines.forEach((l, i) => { for (const q of ['"""', "'''"]) if (l.includes(q)) holders[q]!.push(i); });
-  const next: Record<string, number> = { '"""': 0, "'''": 0 };
-  for (let i = 0; i < lines.length; i++) {
-    const m = PY_DOC_OPEN.exec(lines[i]!);
-    if (!m) continue;
-    const q = m[1]!;
-    const from = m[0].length;
-    const same = lines[i]!.indexOf(q, from);
-    if (same >= 0) { add(i, [from, same]); continue; }
-    const list = holders[q]!;
-    while (next[q]! < list.length && list[next[q]!]! <= i) next[q]!++;
-    const j = list[next[q]!];
-    if (j === undefined) continue; // unclosed: not a docstring
-    add(i, [from, Infinity]);
-    for (let k = i + 1; k < j; k++) add(k, WHOLE);
-    add(j, [0, lines[j]!.indexOf(q)]);
-    i = j;
+/** Index of `q` (a quote or triple quote) in `l` at or after `k`, skipping backslash escapes; -1 if none. */
+function closingQuote(l: string, k: number, q: string): number {
+  for (; k < l.length; k++) {
+    if (l[k] === '\\') k++;
+    else if (l.startsWith(q, k)) return k;
   }
+  return -1;
+}
+
+/**
+ * One pass over a Python file's strings and comments. Quoted spans: `#` comments (to the end of the line) and
+ * bare docstrings, meaning a closed triple-quoted string that is the first token of its line (a module, class or
+ * function docstring). An assigned or argument triple-quoted string is code, and an f-string runs code: neither
+ * is a docstring. String state carries across lines, so a closing triple quote is never taken for an opener.
+ */
+function pyStrings(lines: string[], add: (i: number, s: Span) => void): void {
+  let triple: { q: string; doc: boolean; line: number; at: number } | undefined;
+  const pending: Array<[number, Span]> = [];
+  lines.forEach((l, i) => {
+    let k = 0;
+    while (k < l.length) {
+      if (triple) {
+        const end = closingQuote(l, k, triple.q);
+        if (end < 0) {
+          if (triple.doc) pending.push([i, triple.line === i ? [triple.at, Infinity] : WHOLE]);
+          return;
+        }
+        if (triple.doc) {
+          for (const [li, sp] of pending) add(li, sp);
+          add(i, [triple.line === i ? triple.at : 0, end]);
+        }
+        pending.length = 0;
+        k = end + 3;
+        triple = undefined;
+        continue;
+      }
+      const c = l[k]!;
+      if (c === '#') { add(i, [k, Infinity]); return; }
+      if (c !== '"' && c !== "'" && !'rRbBuUfF'.includes(c)) { k++; continue; }
+      const m = /^([rRbBuUfF]{0,2})("""|\'\'\'|"|')/.exec(l.slice(k, k + 5));
+      if (m && (k === 0 || !/\w/.test(l[k - 1]!))) {
+        const prefix = m[1]!;
+        const q = m[2]!;
+        const body = k + prefix.length + q.length;
+        if (q.length === 3) {
+          triple = { q, line: i, at: body, doc: !/[fF]/.test(prefix) && l.slice(0, k).trim() === '' };
+          k = body;
+        } else {
+          const end = closingQuote(l, body, q);
+          k = end < 0 ? l.length : end + 1;
+        }
+        continue;
+      }
+      k++;
+    }
+  });
+  // An unclosed triple-quoted string at the end of the file quotes nothing.
 }
 
 /** `//` and `/* … *\/` comments outside string literals. A comment opener needs a separator before it. */
@@ -124,12 +160,36 @@ function jsComments(lines: string[], add: (i: number, s: Span) => void): void {
       if (c === '"' || c === "'" || c === '`') { quote = c; k++; continue; }
       if (l.startsWith('//', k) && opener(l, k)) { add(i, [k, Infinity]); break; }
       if (l.startsWith('/*', k) && opener(l, k)) { block = { line: i, at: k }; k += 2; continue; }
+      if (c === '/' && regexStart(l, k)) { k = regexEnd(l, k); continue; }
       k++;
     }
     template = quote === '`';
     if (block) pending.push([i, block.line === i ? [block.at, Infinity] : WHOLE]);
   });
   // An unclosed block comment at the end of the file quotes nothing.
+}
+
+/** A `/` starts a regex literal after an operator or opening bracket, at the start of a line, or after a keyword. */
+function regexStart(l: string, k: number): boolean {
+  const before = l.slice(0, k).trimEnd();
+  return before === '' || /[(,=:[!&|?{};+\-*%<>~^]$/.test(before) || /\b(?:return|typeof|case|in|of|void|delete|throw|new|yield|await)$/.test(before);
+}
+
+/** The index just past a regex literal starting at `k` (its closing `/` and flags), or the end of the line. */
+function regexEnd(l: string, k: number): number {
+  let inClass = false;
+  for (k++; k < l.length; k++) {
+    const c = l[k]!;
+    if (c === '\\') k++;
+    else if (c === '[') inClass = true;
+    else if (c === ']') inClass = false;
+    else if (c === '/' && !inClass) {
+      k++;
+      while (k < l.length && /\w/.test(l[k]!)) k++;
+      return k;
+    }
+  }
+  return l.length;
 }
 
 /** Why a critical match is only a warning, or undefined when it stays critical. */
@@ -182,42 +242,47 @@ function enclosedInQuotes(site: MatchSite): boolean {
 }
 
 // Real-world skills quote attacks to warn the agent about them ("if a page says 'ignore previous instructions',
-// flag it"). The phrase must come before the match: in the same sentence or the one just before it.
+// flag it"). The phrase must come before the match, in the same sentence.
 const DEFENSIVE_END = /\b(?:if|when)\s+(?:[\w-]+\s+){0,2}(?:says|contains|tries|asks)(?:\s+(?:you\s+)?to)?[\s:,"'“「(]*$/i;
 const DEFENSIVE_ANY = /never\s+follow|not\s+(?:an?\s+)?instructions?|injection|data,?\s+not|绝不|flag\s+it/i;
 
 function defensiveBefore(site: MatchSite): boolean {
   const prefix = site.text.slice(Math.max(0, site.index - 4096), site.index);
-  const stops = [...prefix.matchAll(/[.!?。](?=\s|$)/g)].map((m) => m.index! + 1);
-  const region = prefix.slice(stops.length >= 2 ? stops[stops.length - 2]! : 0);
+  const stops = [...prefix.matchAll(/[.!?。](?=\s|$)/g)];
+  const region = stops.length ? prefix.slice(stops[stops.length - 1]!.index! + 1) : prefix;
   if (DEFENSIVE_END.test(region) || DEFENSIVE_ANY.test(region)) return true;
   // "Treat <match> as data."
   return /\btreat\b/i.test(region) && /^[^.!?]{0,30}?\bas\s+data\b/i.test(site.text.slice(site.index + site.length, site.index + site.length + 64));
 }
 
-const REGEX_CALL = /\bre\.(?:search|match|compile|findall|finditer|sub|fullmatch|split)\(|\bnew RegExp\(/g;
+const PY_REGEX_CALL = /\bre\.(?:search|match|compile|findall|finditer|sub|subn|fullmatch|split|escape)\(/g;
+const JS_REGEX_CALL = /\b(?:new\s+)?RegExp\(/g;
 
-/** The match lies inside the argument list of the last regex call that starts before it. */
+/**
+ * Python and JS/TS only: the match lies inside a string literal that is a direct argument of a regex call
+ * (re.compile(…), re.escape(…), new RegExp(…)), not nested in another call or expression.
+ */
 function insideRegexCall(site: MatchSite): boolean {
-  let open = -1;
-  for (const m of site.text.slice(0, site.index).matchAll(REGEX_CALL)) open = m.index! + m[0].length - 1;
-  if (open < 0) return false;
-  const close = closingParen(site.text, open);
-  return close >= 0 && site.index + site.length <= close;
+  const calls = PY_FILE.test(site.file) ? PY_REGEX_CALL : JS_FILE.test(site.file) ? JS_REGEX_CALL : undefined;
+  if (!calls) return false;
+  const opens = [...site.text.slice(0, site.index).matchAll(calls)].slice(-8).map((m) => m.index! + m[0].length - 1);
+  return opens.some((open) => directStringArgument(site.text, open, site.index, site.index + site.length));
 }
 
-/** Index of the `)` that closes the `(` at `open`, skipping string literals; -1 if none on the line. */
-function closingParen(text: string, open: number): number {
+/** A string literal at bracket depth 1 of the call opened at `open` encloses [from, to). */
+function directStringArgument(text: string, open: number, from: number, to: number): boolean {
   let depth = 0;
-  let quote: string | undefined;
-  for (let k = open; k < text.length; k++) {
+  for (let k = open; k < text.length && k < from; k++) {
     const c = text[k]!;
-    if (quote) { if (c === '\\') k++; else if (c === quote) quote = undefined; continue; }
-    if (c === '"' || c === "'" || c === '`') quote = c;
-    else if (c === '(') depth++;
-    else if (c === ')' && --depth === 0) return k;
+    if (c === '"' || c === "'" || c === '`') {
+      const end = closingQuote(text, k + 1, c);
+      if (end < 0) return false;
+      if (depth === 1 && k < from && to <= end) return true;
+      k = end;
+    } else if (c === '(' || c === '[' || c === '{') depth++;
+    else if ((c === ')' || c === ']' || c === '}') && --depth === 0) return false;
   }
-  return -1;
+  return false;
 }
 
 const PRINT_CALL = /^\s*(?:echo|printf|print|puts|console\.(?:log|error|info|warn)|Write-(?:Host|Output))\s*\(?\s*[frbu]?(["'`])/i;
@@ -241,26 +306,29 @@ function onlyPrints(site: MatchSite): boolean {
   return AFTER_PRINT.test(site.text.slice(end + 1));
 }
 
-const URL_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>)]*/gi;
-const LOCAL = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::[^/?#@]*)?(?:[/?#]|$)/i;
-const HOSTLIKE = /^(?:(?:[a-z0-9-]+\.)+[a-z]{2,}|\d{1,3}(?:\.\d{1,3}){3}|localhost|\[::1\])(?::\d+)?(?:[/?#]|$)/i;
-const PROGRAM = /\.(?:py|js|mjs|cjs|ts|rb|pl)$/i;
+const LOCAL_URL = /\bhttps?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?![\w.-])/i;
+const HOST_LIKE = /[\w-]+(?:\.[\w-]+)+\.?/g;
+const LOOPBACK = /^(?:127\.0\.0\.1|localhost)\.?$/i;
+/** Dotted names that are the client and environment APIs on these lines, not hosts. */
+const CODE_NAME = /^(?:os\.environ(?:\.get)?|os\.getenv|process\.env(?:\.[A-Z_][A-Z0-9_]*)?|(?:requests|httpx|axios)\.(?:post|put|patch|get|request)|urllib\.request(?:\.urlopen)?|json\.dumps|JSON\.stringify)$/;
+const OTHER_ADDRESS = /\b\d{8,10}\b|\b0x[0-9a-f]{6,8}\b|\[(?!::1\])[0-9a-f:.]*:[0-9a-f:.]*\]|\b[0-9a-f]{1,4}(?::[0-9a-f]{0,4}){2,7}\b/i;
+const CLIENT_VAR_ARG = /\b(?:requests\.\w+|httpx\.\w+|axios(?:\.\w+)?|urlopen|\$?o?fetch\w*)\(\s*[A-Za-z_$][\w$.]*\s*[,)]/i;
 
 /**
- * Every network target on the line is this machine, and there is at least one. Targets: URLs (no userinfo), and
- * host-like tokens: shell words, or string literals in program files. A trailing comment doesn't count.
+ * The only network target on the line is this machine: it has a loopback URL (http(s)://localhost, 127.0.0.1 or
+ * [::1]) and nothing else that could be a target. No other host-like name anywhere on the line (comments
+ * included), no IP literal other than loopback (dotted, decimal, hex or IPv6), no argument that is a bare
+ * variable (`"$URL"` in a shell command, a variable as the first argument of requests/fetch/urlopen/axios).
  */
 function localOnly(site: MatchSite): boolean {
-  let s = site.text.replace(JS_FILE.test(site.file) ? /(^|\s)\/\/.*$/ : /(^|\s)#.*$/, '$1');
-  const targets: boolean[] = [];
-  for (const u of s.match(URL_RE) ?? []) {
-    const authority = u.slice(u.indexOf('://') + 3).split(/[/?#]/, 1)[0]!;
-    targets.push(!authority.includes('@') && LOCAL.test(authority));
+  const s = site.text;
+  if (!LOCAL_URL.test(s) || OTHER_ADDRESS.test(s) || CLIENT_VAR_ARG.test(s)) return false;
+  for (const m of s.matchAll(HOST_LIKE)) if (!LOOPBACK.test(m[0]) && !CODE_NAME.test(m[0])) return false;
+  if (!JS_FILE.test(site.file) && !PY_FILE.test(site.file)) {
+    const words = s.split(/\s+/);
+    for (let k = 0; k < words.length; k++) {
+      if (/^["']?\$\{?\w+\}?["']?$/.test(words[k]!) && !(words[k - 1] ?? '').startsWith('-')) return false;
+    }
   }
-  s = s.replace(URL_RE, ' ');
-  const tokens = PROGRAM.test(site.file)
-    ? [...s.matchAll(/"([^"]*)"|'([^']*)'|`([^`]*)`/g)].map((m) => (m[1] ?? m[2] ?? m[3] ?? '').trim())
-    : s.split(/[\s"'`=(),;{}[\]<>|&]+/);
-  for (const t of tokens) if (HOSTLIKE.test(t)) targets.push(LOCAL.test(t));
-  return targets.length > 0 && targets.every(Boolean);
+  return true;
 }

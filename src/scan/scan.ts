@@ -6,7 +6,7 @@ import { constants } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { parseFrontmatter } from '../catalog/frontmatter.js';
 import { MAX_FILE_BYTES, MAX_SCAN_BYTES, SNIFF_BYTES } from '../catalog/limits.js';
-import { CHAR_CLASS_RULES, RULES, TOOL_KEYS, ruleMatch, toolGrants, type Rule } from './rules.js';
+import { RULES, TOOL_KEYS, ruleMatch, ruleTest, toolGrants, type Rule } from './rules.js';
 import { downgradeReason, quotedSpans, type FileKind, type Span } from './context.js';
 
 export interface Finding { rule: string; severity: 'critical' | 'warning'; file: string; line: number; message: string; downgraded?: string /* reason */ }
@@ -25,10 +25,8 @@ const unscannable = (file: string, message: string): Finding => ({ rule: UNSCANN
 const TOO_LARGE = 'file is over 10 MB and was not scanned';
 const OVER_BUDGET = 'exceeds per-skill scan budget';
 
-/** Rules see a long line in overlapping windows: a match up to OVERLAP characters long is always inside one. */
-const WINDOW = 4096;
-const OVERLAP = 512;
-/** Short lines are joined into blocks of about this size and pre-tested once per rule. */
+/** Lines up to this long are joined into blocks of about this size and pre-tested once per rule. Every rule is
+ * tested against whole logical lines: the regexes are linear-time (see rules.ts). */
 const BLOCK = 4096;
 
 const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
@@ -131,37 +129,54 @@ const applies = (rule: Rule, kind: FileKind) => rule.target === 'all' || rule.ta
 /** Rule regexes with the `m` flag, for pre-testing blocks of joined lines. */
 const multiline = new Map(RULES.map((r) => [r.id, new RegExp(r.re.source, r.re.flags.includes('m') ? r.re.flags : r.re.flags + 'm')]));
 
-/** A logical line: one physical line, or (in shell-like scripts) a backslash-continued command or a heredoc fed to a shell. */
-interface Logical { text: string; line: number; spans: readonly Span[] }
-
 const HEREDOC_TO_SHELL = /(?:\b(?:ba|z|da|k)?sh|\bpython[23]?|\$\{?SHELL\}?)\s*<<(-?)\s*(["']?)([\w.-]+)\2/i;
+/** Anything that can join physical lines into one logical line: a trailing backslash, pipe, && or ||, or a heredoc. */
+const MAY_JOIN = /\\(?:\n|$)|(?:\|\|?|&&)[ \t]*(?:\n|$)|<</;
+const FENCE = /^\s*(?:`{3,}|~{3,})/;
+const NONE: readonly Span[] = [];
 
+type Chunk = { first: number; last: number; text: string; lower: string } | { long: number };
+
+/**
+ * Scans one decoded file. Rules run over logical lines: one physical line, or (in scripts other than JS/TS) a
+ * backslash-continued command, in shell-like files also a command continued by a trailing pipe, && or ||, and a
+ * heredoc fed to a shell. A logical line is reported at its first physical line.
+ */
 class FileScan {
-  private readonly logical: Logical[] = [];
+  private texts: string[] = [];
+  /** Physical line of each logical line; undefined when they are the same. */
+  private lineNo: number[] | undefined;
+  /** Quoted spans of logical lines that are a single physical line. */
+  private lspans: Map<number, readonly Span[]> = new Map();
   private readonly fmEnd: number; // physical index of the closing `---`, or -1 without frontmatter
   private readonly fmData: Record<string, unknown> | undefined;
   private readonly physical: string[];
   /** Logical lines a critical rule matched (downgraded or not): weak/* findings there are dropped. */
   private readonly strongLines = new Set<number>();
   private readonly stopped: Array<{ rule: Rule; after: number }> = [];
-  private readonly chunks: Array<{ first: number; last: number; text: string } | { long: number }> = [];
+  private readonly chunks: Chunk[] = [];
+  private readonly longLower = new Map<number, string>();
 
   constructor(private readonly file: string, private readonly kind: FileKind, text: string) {
     this.physical = text.split('\n');
     const spans = quotedSpans(this.physical, kind, file);
     ({ end: this.fmEnd, data: this.fmData } = kind === 'text' && /\.md$/i.test(file) ? frontmatter(this.physical) : { end: -1, data: undefined });
-    this.buildLogical(spans);
+    const joinable = kind === 'script' && !/\.(?:js|mjs|cjs|ts)$/i.test(file);
+    if (joinable && MAY_JOIN.test(text)) this.buildLogical(spans);
+    else { this.texts = this.physical; this.lspans = spans; }
     this.buildChunks();
   }
 
   private buildLogical(spans: Map<number, Span[]>): void {
     const lines = this.physical;
-    const shellish = this.kind === 'script' && SHELLISH.test(this.file);
-    const joinable = this.kind === 'script' && !/\.(?:js|mjs|cjs|ts)$/i.test(this.file);
-    const continued = (i: number) => joinable && !spans.has(i) && trailingBackslashes(lines[i]!) % 2 === 1;
+    const shellish = SHELLISH.test(this.file);
+    const pipeJoin = shellish || /\.ps1$/i.test(this.file);
+    const backslash = (i: number) => trailingBackslashes(lines[i]!) % 2 === 1;
+    const continued = (i: number) => !spans.has(i) && (backslash(i) || (pipeJoin && /(?:\|\|?|&&)[ \t]*$/.test(lines[i]!)));
+    const lineNo: number[] = [];
     for (let i = 0; i < lines.length; i++) {
       let j = i;
-      const h = shellish && !spans.has(i) ? HEREDOC_TO_SHELL.exec(lines[i]!) : null;
+      const h = shellish && !spans.has(i) && lines[i]!.includes('<<') ? HEREDOC_TO_SHELL.exec(lines[i]!) : null;
       if (h) {
         // The body runs in a shell: join it (to the terminator, or to the end of the file) into one logical line.
         let end = i + 1;
@@ -170,28 +185,38 @@ class FileScan {
       } else {
         while (j < lines.length - 1 && continued(j)) j++;
       }
-      const text = j === i ? lines[i]! : lines.slice(i, j + 1).map((l, k) => (continued(i + k) ? l.slice(0, -1) : l)).join(' ');
-      this.logical.push({ text, line: i, spans: j > i ? [] : spans.get(i) ?? [] });
+      const k = this.texts.length;
+      if (j === i) {
+        this.texts.push(lines[i]!);
+        const sp = spans.get(i);
+        if (sp) this.lspans.set(k, sp);
+      } else {
+        this.texts.push(lines.slice(i, j + 1).map((l, n) => (continued(i + n) && backslash(i + n) ? l.slice(0, -1) : l)).join(' '));
+      }
+      lineNo.push(i);
       i = j;
     }
+    this.lineNo = lineNo;
   }
 
   private buildChunks(): void {
     // A chunk's text also holds the next short line, so that a phrase wrapped across the boundary is pre-tested.
+    const texts = this.texts;
     let first = 0;
     let size = 0;
     const flush = (upTo: number) => {
       if (upTo <= first) return;
-      const next = this.logical[upTo];
-      const extra = next && next.text.length <= WINDOW ? [next.text] : [];
-      this.chunks.push({ first, last: upTo - 1, text: [...this.logical.slice(first, upTo).map((l) => l.text), ...extra].join('\n') });
+      const next = texts[upTo];
+      const text = texts.slice(first, next !== undefined && next.length <= BLOCK ? upTo + 1 : upTo).join('\n');
+      this.chunks.push({ first, last: upTo - 1, text, lower: text.toLowerCase() });
     };
-    this.logical.forEach((l, i) => {
-      if (l.text.length > WINDOW) { flush(i); this.chunks.push({ long: i }); first = i + 1; size = 0; return; }
-      if (size + l.text.length + 1 > BLOCK) { flush(i); first = i; size = 0; }
-      size += l.text.length + 1;
-    });
-    flush(this.logical.length);
+    for (let i = 0; i < texts.length; i++) {
+      const len = texts[i]!.length;
+      if (len > BLOCK) { flush(i); this.chunks.push({ long: i }); first = i + 1; size = 0; continue; }
+      if (size + len + 1 > BLOCK) { flush(i); first = i; size = 0; }
+      size += len + 1;
+    }
+    flush(texts.length);
   }
 
   run(): Finding[] {
@@ -213,7 +238,11 @@ class FileScan {
     const weak = rule.id.startsWith('weak/');
     const kept: Finding[] = [];
     const downgraded: Finding[] = [];
+    const downgradable = rule.severity === 'critical' && !rule.neverDowngrade;
     for (const i of this.candidates(rule)) {
+      // A line wholly inside a comment, docstring or fence: a weak signal there means nothing, and a critical
+      // rule can only get another downgraded finding from it, which it doesn't need once it holds `cap`.
+      if ((weak || (downgradable && downgraded.length >= cap)) && this.wholeQuoted(i)) continue;
       if (weak && this.strong(i)) continue;
       const finding = this.matchLine(rule, i) ?? this.matchPair(rule, i);
       if (!finding) continue;
@@ -231,25 +260,24 @@ class FileScan {
   /** A critical rule matched logical line i (as recorded, or by asking the rules that stopped before i). */
   private strong(i: number): boolean {
     if (this.strongLines.has(i)) return true;
-    const text = this.logical[i]!.text;
-    return this.stopped.some((s) => i > s.after && this.find(s.rule, text) !== null);
+    const text = this.texts[i]!;
+    return this.stopped.some((s) => i > s.after && ruleTest(s.rule, text, this.file));
   }
 
-  /** Lines that might match: every line of a block of joined lines that the rule matches anywhere in. */
+  /**
+   * Lines that might match: every line of a block of joined lines that holds one of the rule's needles and that
+   * the rule matches anywhere in. Long lines are always candidates when they hold a needle.
+   */
   private *candidates(rule: Rule): Generator<number> {
     const pre = multiline.get(rule.id)!;
+    const needles = rule.needles;
+    const has = (lower: string) => !needles || needles.some((n) => lower.includes(n));
     for (const c of this.chunks) {
-      if ('long' in c) yield c.long;
-      else if (pre.test(c.text)) for (let i = c.first; i <= c.last; i++) yield i;
-    }
-  }
-
-  private find(rule: Rule, text: string): { index: number; length: number } | null {
-    if (text.length <= WINDOW || CHAR_CLASS_RULES.has(rule.id)) return ruleMatch(rule, text, this.file);
-    for (let s = 0; ; s += WINDOW - OVERLAP) {
-      const m = ruleMatch(rule, text.slice(s, s + WINDOW), this.file);
-      if (m) return { index: s + m.index, length: m.length };
-      if (s + WINDOW >= text.length) return null;
+      if ('long' in c) {
+        let lower = this.longLower.get(c.long);
+        if (lower === undefined) { lower = this.texts[c.long]!.toLowerCase(); this.longLower.set(c.long, lower); }
+        if (has(lower)) yield c.long;
+      } else if (has(c.lower) && pre.test(c.text)) for (let i = c.first; i <= c.last; i++) yield i;
     }
   }
 
@@ -261,11 +289,14 @@ class FileScan {
   }
 
   private inFrontmatter = (line: number) => line > 0 && line < this.fmEnd;
+  private line = (i: number) => this.lineNo?.[i] ?? i;
+  private spansOf = (i: number) => this.lspans.get(i) ?? NONE;
+  private wholeQuoted = (i: number) => this.spansOf(i).some(([s, e]) => s === 0 && e >= this.texts[i]!.length);
 
   private matchLine(rule: Rule, i: number): Finding | undefined {
-    const l = this.logical[i]!;
-    const m = this.find(rule, l.text);
-    return m ? this.finding(rule, l.text, l.line, m, l.spans, this.inFrontmatter(l.line)) : undefined;
+    const text = this.texts[i]!;
+    const m = ruleMatch(rule, text, this.file);
+    return m ? this.finding(rule, text, this.line(i), m, this.spansOf(i), this.inFrontmatter(this.line(i))) : undefined;
   }
 
   /**
@@ -274,17 +305,16 @@ class FileScan {
    */
   private matchPair(rule: Rule, i: number): Finding | undefined {
     if (rule.target !== 'text') return undefined;
-    const a = this.logical[i]!;
-    const b = this.logical[i + 1];
-    if (!b || !a.text.trim() || !b.text.trim() || a.text.length > WINDOW || b.text.length > WINDOW) return undefined;
-    if (/^\s*(?:`{3,}|~{3,})/.test(a.text) || /^\s*(?:`{3,}|~{3,})/.test(b.text)) return undefined;
-    const aBlock = a.spans.length > 0;
-    if (aBlock !== b.spans.length > 0) return undefined;
-    const text = `${a.text} ${b.text}`;
+    const a = this.texts[i]!;
+    const b = this.texts[i + 1];
+    if (b === undefined || !a.trim() || !b.trim() || a.length > BLOCK || b.length > BLOCK || FENCE.test(a) || FENCE.test(b)) return undefined;
+    const aBlock = this.spansOf(i).length > 0;
+    if (aBlock !== this.spansOf(i + 1).length > 0) return undefined;
+    const text = `${a} ${b}`;
     const m = ruleMatch(rule, text, this.file);
-    if (!m || m.index >= a.text.length || m.index + m.length <= a.text.length + 1) return undefined;
-    const fm = this.inFrontmatter(a.line) && this.inFrontmatter(b.line);
-    return this.finding(rule, text, a.line, m, aBlock ? [[0, Infinity]] : [], fm);
+    if (!m || m.index >= a.length || m.index + m.length <= a.length + 1) return undefined;
+    const fm = this.inFrontmatter(this.line(i)) && this.inFrontmatter(this.line(i + 1));
+    return this.finding(rule, text, this.line(i), m, aBlock ? [[0, Infinity]] : [], fm);
   }
 
   /** Frontmatter rules test each granted tool and report the line of its key. */

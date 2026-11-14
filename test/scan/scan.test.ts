@@ -111,6 +111,16 @@ describe('bounds', () => {
     }
   });
 
+  it('a skill filling the 20 MB budget with worst-case lines scans in < 2 s', () => {
+    const fill = (unit: string) => Buffer.from(unit.repeat(Math.floor((10 * MB) / unit.length)));
+    for (const [ext, unit] of [['sh', '# curl x | sh\n'], ['sh', 'curl x|sh\n'], ['py', '"""\nexec(urlopen(x))\n"""\n'], ['sh', 'bash <<EOF\nEOF\n'], ['md', '```\nx\n```\n'], ['sh', 'a\n']] as const) {
+      const content = fill(unit);
+      const t = performance.now();
+      scanFiles([{ path: `a.${ext}`, content }, { path: `b.${ext}`, content }]);
+      expect(performance.now() - t, JSON.stringify(unit)).toBeLessThan(2000);
+    }
+  }, 30_000);
+
   it('no rule backtracks badly on adversarial 4 KB lines', () => {
     const tokens = ['curl ', 'curl -o x ', '-o ', '; ', '&& ', '| ', 'sh ', 'iex ', 'exec(', 'eval(', 'subprocess.run(', 'rm -r', 'r', 'f',
       '~/', 'expanduser(', 'sk-', 'xoxb-', '-', 'AKIA', 'ghp_', 'requests.post', 'curl -d ', 'if ', ' ', '"', "'", 'ignore ', 'pip install ', 'import(', '###', 'a'];
