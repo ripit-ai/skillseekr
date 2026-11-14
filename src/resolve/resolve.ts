@@ -2,7 +2,7 @@ import { parseRegistriesFile } from '../config/load.js';
 import type { Ctx } from '../context.js';
 import { readGithubFile, type FetchOpts } from '../sources/github.js';
 import { fetchHttpText } from '../sources/http.js';
-import type { Config, IncludeEntry, Problem, RegistryEntry, SourceEntry } from '../types.js';
+import type { Config, IncludeEntry, Problem, RegistriesFile, RegistryEntry, SourceEntry } from '../types.js';
 
 export interface ResolvedRegistry { name: string; entry: SourceEntry; via: string[]; trusted: boolean /* true iff declared directly in local config */ }
 export interface Override { kind: 'registry' | 'skill'; key: string; replaced: { registry: string; via: string[] }; by: { registry: string; via: string[] } }
@@ -18,9 +18,17 @@ const isInclude = (e: RegistryEntry): e is IncludeEntry => e.type === 'github-re
 const usesEnvAuth = (e: RegistryEntry): boolean =>
   e.auth.type === 'github_token' || e.auth.type === 'bearer' || e.auth.type === 'basic';
 
-/** Identity of the file an include points at, used for loop detection and as the file label in problems. */
+/** Normalised URL (scheme/host case, default port, dot segments); the raw string when it doesn't parse. */
+const normUrl = (u: string): string => { try { return new URL(u).href; } catch { return u; } };
+
+/**
+ * Identity of the file an include points at, for loop detection and memoisation. GitHub owner/repo are
+ * case-insensitive and URLs are normalised, so a hostile file can't dodge loop detection with spelling.
+ */
 const includeId = (e: IncludeEntry): string =>
-  e.type === 'github-registry' ? `gh:${e.owner}/${e.repo}@${e.ref}:${e.path}` : `url:${e.url}`;
+  e.type === 'github-registry'
+    ? `gh:${e.owner.toLowerCase()}/${e.repo.toLowerCase()}@${e.ref}:${e.path}`
+    : `url:${normUrl(e.url)}`;
 
 const fileLabel = (e: IncludeEntry): string =>
   e.type === 'github-registry' ? `github:${e.owner}/${e.repo}@${e.ref}:${e.path}` : e.url;
@@ -34,7 +42,10 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
   const hoisted = new Map<string, ResolvedRegistry>();
   let stale = false;
 
-  const fetchInclude = (entry: IncludeEntry, trusted: boolean) => {
+  type Fetched = Awaited<ReturnType<typeof readGithubFile>> | Awaited<ReturnType<typeof fetchHttpText>>;
+  type Loaded = Exclude<Fetched, { error: Problem }> & { sha?: string; parsed: RegistriesFile };
+
+  const fetchInclude = (entry: IncludeEntry, trusted: boolean): Promise<Fetched> => {
     const fo: FetchOpts = {
       force: opts.force, trusted,
       ttlSeconds: config.cache.enabled && entry.cache_enabled ? config.cache.ttlSeconds : 0,
@@ -42,6 +53,29 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
     return entry.type === 'github-registry'
       ? readGithubFile(entry, fo, config.cache, ctx)
       : fetchHttpText(entry, fo, config.cache, ctx);
+  };
+
+  /**
+   * Fetch + parse once per include target within this call (diamond / fan-out graphs). Keyed by identity,
+   * trust and auth, since those decide which credentials the fetch may use. Unexpected throws become a problem.
+   */
+  const memo = new Map<string, Promise<Loaded | { error: Problem }>>();
+  const load = (entry: IncludeEntry, id: string, trusted: boolean): Promise<Loaded | { error: Problem }> => {
+    const key = `${id}\0${trusted}\0${JSON.stringify(entry.auth)}`;
+    let p = memo.get(key);
+    if (!p) {
+      p = (async () => {
+        try {
+          const r = await fetchInclude(entry, trusted);
+          if ('error' in r) return r;
+          return { ...r, parsed: parseRegistriesFile(r.text, { file: fileLabel(entry), isLocalConfig: false }) };
+        } catch (e) {
+          return { error: { level: 'error', code: 'resolve/include-failed', message: `fetching ${fileLabel(entry)} failed unexpectedly: ${(e as Error)?.message ?? String(e)}` } };
+        }
+      })();
+      memo.set(key, p);
+    }
+    return p;
   };
 
   const walk = async (registries: Array<[string, RegistryEntry]>, lvl: Level): Promise<void> => {
@@ -86,19 +120,19 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
         continue;
       }
 
-      const r = await fetchInclude(entry, lvl.trusted);
+      const r = await load(entry, id, lvl.trusted);
       if ('error' in r) {
-        problems.push({ ...r.error, registry: name, via });
+        problems.push({ ...r.error, registry: name, via, file: r.error.file ?? lvl.file });
         continue;
       }
-      for (const p of r.problems) problems.push({ ...p, registry: name, via });
+      for (const p of r.problems) problems.push({ ...p, registry: name, via, file: p.file ?? lvl.file });
       if (r.stale) stale = true;
       includes.push({
-        name, via, entry, ...('sha' in r && typeof r.sha === 'string' ? { sha: r.sha } : {}), stale: r.stale, policy: entry.policy && depth === 1,
+        name, via, entry, ...(r.sha !== undefined ? { sha: r.sha } : {}), stale: r.stale, policy: entry.policy && depth === 1,
       });
 
       const file = fileLabel(entry);
-      const parsed = parseRegistriesFile(r.text, { file, isLocalConfig: false });
+      const { parsed } = r;
       for (const p of parsed.problems) {
         problems.push({ ...p, registry: p.registry ?? name, via: p.registry ? [...via, p.registry] : via, file: p.file ?? file });
       }

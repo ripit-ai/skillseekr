@@ -27,11 +27,13 @@ const repoWith = (registries: Entries, extra: Record<string, unknown> = {}) =>
 async function setup(o: {
   local: Entries; repos?: FakeSpec; routes?: Record<string, FakeRoute>;
   env?: Record<string, string | undefined>; cache?: { enabled: boolean; ttlSeconds: number };
+  wrap?: (http: Http) => Http;
 }) {
   const dir = await tmpDir();
   const github = fakeGithub(o.repos ?? {});
   const web = fakeHttp(o.routes ?? {});
-  const http: Http = { get: (url, h, opts) => (url.startsWith(API) ? github.http : web.http).get(url, h, opts) };
+  const routed: Http = { get: (url, h, opts) => (url.startsWith(API) ? github.http : web.http).get(url, h, opts) };
+  const http = o.wrap ? o.wrap(routed) : routed;
   const ctx: Ctx = {
     env: o.env ?? {}, home: join(dir, 'home'), cwd: dir, http, exec: noExec, now: () => 1_700_000_000_000, githubApi: API,
   };
@@ -184,7 +186,7 @@ describe('resolve', () => {
     const r = await resolve(config, { force: false }, ctx);
     expect(r.registries.map((x) => [x.name, x.via])).toEqual([['before', ['before']], ['w', ['web', 'w']], ['after', ['after']]]);
     const noAccess = r.problems.find((p) => p.code === 'source/no-access');
-    expect(noAccess).toMatchObject({ level: 'error', registry: 'priv', via: ['priv'] });
+    expect(noAccess).toMatchObject({ level: 'error', registry: 'priv', via: ['priv'], file: config.path });
     expect(noAccess?.message).toContain('o/private');
     expect(noAccess?.message).toContain('gh auth login');
     expect(r.includes.map((i) => i.name)).toEqual(['web']);
@@ -213,7 +215,7 @@ describe('resolve', () => {
     expect(r.stale).toBe(true);
     expect(r.includes[0]).toMatchObject({ name: 'A', stale: true, sha: SHA });
     expect(r.registries.map((x) => x.name)).toEqual(['x']);
-    expect(r.problems).toEqual([expect.objectContaining({ level: 'warning', code: 'source/stale', registry: 'A', via: ['A'] })]);
+    expect(r.problems).toEqual([expect.objectContaining({ level: 'warning', code: 'source/stale', registry: 'A', via: ['A'], file: config.path })]);
   });
 
   it('passes config problems through', async () => {
@@ -236,5 +238,68 @@ describe('resolve', () => {
     expect(r).toMatchObject({ includes: [], overrides: [], problems: [], stale: false });
     expect(github.calls).toEqual([]);
     expect(web.calls).toEqual([]);
+  });
+
+  it('loop identity ignores owner/repo case and URL spelling', async () => {
+    const { config, ctx, web } = await setup({
+      local: { A: ghInclude('a'), W: { type: 'http-registry', url: 'https://x.example/r.jsonc' } },
+      repos: { 'o/a': repoWith({ upper: { type: 'github-registry', owner: 'O', repo: 'A', ref: 'main' }, fromA: gh('fa') }) },
+      routes: { 'https://x.example/r.jsonc': { body: file({ again: { type: 'http-registry', url: 'HTTPS://X.EXAMPLE:443/./r.jsonc' }, w: gh('w') }) } },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.registries.map((x) => x.name)).toEqual(['fromA', 'w']);
+    expect(r.problems.map((p) => [p.code, p.registry, p.via])).toEqual([
+      ['resolve/include-loop', 'upper', ['A', 'upper']],
+      ['resolve/include-loop', 'again', ['W', 'again']],
+    ]);
+    expect(web.calls).toHaveLength(1);
+  });
+
+  it('fetches a repeated include target once per resolve, even with force', async () => {
+    const { config, ctx, github } = await setup({
+      local: { H: ghInclude('hub') },
+      repos: {
+        'o/hub': repoWith({ T1: ghInclude('t'), T2: ghInclude('t'), T3: ghInclude('t') }),
+        'o/t': repoWith({ x: gh('x') }),
+      },
+    });
+    const r = await resolve(config, { force: true }, ctx);
+    expect(github.calls.filter((c) => c.startsWith('/repos/o/t/'))).toEqual(['/repos/o/t/commits/main', `/repos/o/t/contents/registries.jsonc?ref=${SHA}`]);
+    // Still walked three times for via and override bookkeeping.
+    expect(r.includes.map((i) => i.via)).toEqual([['H'], ['H', 'T1'], ['H', 'T2'], ['H', 'T3']]);
+    expect(r.registries).toEqual([expect.objectContaining({ name: 'x', via: ['H', 'T3', 'x'] })]);
+    expect(r.overrides.map((o) => [o.replaced.via, o.by.via])).toEqual([
+      [['H', 'T1', 'x'], ['H', 'T2', 'x']],
+      [['H', 'T2', 'x'], ['H', 'T3', 'x']],
+    ]);
+    expect(r.problems).toEqual([]);
+  });
+
+  it('a nested fetch error carries the containing file', async () => {
+    const { config, ctx } = await setup({
+      local: { A: ghInclude('a') },
+      repos: { 'o/a': repoWith({ gone: ghInclude('missing'), ok: gh('ok') }) },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.registries.map((x) => x.name)).toEqual(['ok']);
+    expect(r.problems).toEqual([expect.objectContaining({
+      code: 'source/no-access', registry: 'gone', via: ['A', 'gone'], file: 'github:o/a@main:registries.jsonc',
+    })]);
+  });
+
+  it('an unexpected throw while fetching an include becomes resolve/include-failed and resolution continues', async () => {
+    const { config, ctx } = await setup({
+      local: { boom: { type: 'http-registry', url: 'https://boom.example/r.jsonc' }, after: gh('after') },
+      wrap: (http) => ({
+        get: (url, h, opts) => (url.startsWith('https://boom.example/') ? Promise.reject(new Error('kaboom')) : http.get(url, h, opts)),
+      }),
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.registries.map((x) => x.name)).toEqual(['after']);
+    expect(r.includes).toEqual([]);
+    expect(r.problems).toEqual([expect.objectContaining({
+      level: 'error', code: 'resolve/include-failed', registry: 'boom', via: ['boom'], file: config.path,
+    })]);
+    expect(r.problems[0].message).toContain('kaboom');
   });
 });
