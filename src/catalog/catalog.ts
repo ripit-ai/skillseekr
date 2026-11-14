@@ -4,7 +4,7 @@ import type { DiscoveredSkill } from './discover.js';
 import type { ResolvedRegistry, Override } from '../resolve/resolve.js';
 import type { Problem } from '../types.js';
 import { Bm25Index } from './search.js';
-import { MAX_FILE_BYTES } from './limits.js';
+import { MAX_FILE_BYTES, SNIFF_BYTES } from './limits.js';
 
 export interface SkillRecord extends DiscoveredSkill { registry: string; via: string[]; ref?: string; sha?: string; instructions?: string }
 export type Lookup = { kind: 'found'; skill: SkillRecord } | { kind: 'ambiguous'; ids: string[] } | { kind: 'missing' };
@@ -18,7 +18,6 @@ export interface SearchHit {
   overrode: Array<{ registry: string; via: string[] }>;
 }
 
-const SNIFF_BYTES = 8192;
 const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 export class Catalog {
