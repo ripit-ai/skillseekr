@@ -26,7 +26,7 @@ export class Catalog {
   readonly overrides: Override[];
   readonly problems: Problem[];
   readonly stale: boolean;
-  private readonly byId = new Map<string, SkillRecord>();
+  private readonly ids = new Map<string, SkillRecord>();
   private index?: Bm25Index;
 
   constructor(
@@ -37,7 +37,7 @@ export class Catalog {
     for (const r of perRegistry) {
       const instructions = r.registry.entry.instructions;
       for (const s of r.skills) {
-        const prev = this.byId.get(s.id);
+        const prev = this.ids.get(s.id);
         if (prev) {
           skillOverrides.push({
             kind: 'skill', key: s.id,
@@ -49,17 +49,22 @@ export class Catalog {
         if (r.ref !== undefined) rec.ref = r.ref;
         if (r.sha !== undefined) rec.sha = r.sha;
         if (instructions !== undefined) rec.instructions = instructions;
-        this.byId.set(s.id, rec);
+        this.ids.set(s.id, rec);
       }
     }
-    this.skills = [...this.byId.values()].sort((a, b) => byCodeUnit(a.id, b.id));
+    this.skills = [...this.ids.values()].sort((a, b) => byCodeUnit(a.id, b.id));
     this.overrides = [...overrides, ...skillOverrides];
     this.problems = problems;
     this.stale = stale;
   }
 
+  /** Exact skill-id match only (no bare-name fallback): for installed markers, whose id must still exist. */
+  byId(id: string): SkillRecord | undefined {
+    return this.ids.get(id);
+  }
+
   lookup(idOrName: string): Lookup {
-    const exact = this.byId.get(idOrName);
+    const exact = this.ids.get(idOrName);
     if (exact) return { kind: 'found', skill: exact };
     const named = this.skills.filter((s) => s.name === idOrName);
     if (named.length === 1) return { kind: 'found', skill: named[0]! };

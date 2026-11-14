@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, onTestFinished } from 'vitest';
+import { fsHooks } from '../../src/install/installer.js';
 import { lstat, mkdir, readFile, readdir, stat, symlink, writeFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { main } from '../../src/cli/main.js';
@@ -117,6 +118,28 @@ describe('cli', () => {
     expect(o.out).not.toMatch(/^alpha/m);
     const oj = JSON.parse((await s.run('--json', 'outdated')).out);
     expect(oj.outdated.map((x: { name: string }) => x.name)).toEqual(['dup']);
+  });
+
+  it('update reports a failed item on stderr, still updates the rest, and exits 1', async () => {
+    const s = await setup({ registries: { one: gh('one') } });
+    await s.run('install', 'alpha');
+    await s.run('install', 'cat/dup');
+    for (const n of ['alpha', 'dup']) await writeFile(join(s.cwd, '.claude', 'skills', n, 'SKILL.md'), 'local edit');
+    const real = fsHooks.rename;
+    const spy = vi.spyOn(fsHooks, 'rename').mockImplementation(async (from, to) => {
+      if (String(to) === join(s.cwd, '.claude', 'skills', 'alpha')) throw new Error('disk on fire');
+      return real(from, to);
+    });
+    onTestFinished(() => spy.mockRestore());
+    const r = await s.run('update', '--force');
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/^alpha\s+failed/m);
+    expect(r.out).toMatch(/^dup\s+updated/m);
+    expect(r.err).toContain('alpha: disk on fire');
+    expect(await readFile(join(s.cwd, '.claude', 'skills', 'dup', 'SKILL.md'), 'utf8')).toContain('dup helps');
+    const j = await s.run('--json', 'update', '--force');
+    expect(j.code).toBe(1);
+    expect(JSON.parse(j.out).results.find((x: { name: string }) => x.name === 'alpha')).toMatchObject({ result: 'failed', message: 'disk on fire' });
   });
 
   it('update skips modified without --force', async () => {

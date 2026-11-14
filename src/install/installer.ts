@@ -8,6 +8,9 @@ import { PROJECT_SKILLS_DIR, TOOL_IDS, TOOL_TARGETS, presentTools, type Scope, t
 export interface Marker { id: string; name: string; registry: string; via: string[]; ref?: string; sha?: string; contentHash: string; installedAt: string }
 export interface Installed { name: string; scope: Scope; dir: string; tool?: ToolId; marker: Marker; modified: boolean }
 export type InstallStatus = 'current' | 'outdated' | 'modified' | 'missing-from-catalog';
+export type UpdateResult =
+  | { name: string; dir: string; result: 'updated' | 'current' | 'skipped-modified' | 'missing-from-catalog' }
+  | { name: string; dir: string; result: 'failed'; message: string };
 
 const MARKER_FILE = '.skillseekr.json';
 
@@ -150,11 +153,12 @@ export async function listInstalled(ctx: Ctx, opts?: { scope?: Scope; projectDir
   return out;
 }
 
+/** Matches the marker's exact id: a skill that moved to another id is missing, never a bare-name match. */
 export function statusOf(i: Installed, catalog: Catalog): InstallStatus {
-  const found = catalog.lookup(i.marker.id);
-  if (found.kind !== 'found') return 'missing-from-catalog';
+  const skill = catalog.byId(i.marker.id);
+  if (!skill) return 'missing-from-catalog';
   if (i.modified) return 'modified';
-  if (found.skill.contentHash !== i.marker.contentHash) return 'outdated';
+  if (skill.contentHash !== i.marker.contentHash) return 'outdated';
   return 'current';
 }
 
@@ -178,22 +182,26 @@ export async function removeInstalled(name: string, scope: Scope, ctx: Ctx, opts
   throw new InstallError('not-installed', `Skill "${name}" is not installed in ${scope} scope.`);
 }
 
+/** Never throws for one item: a failed install is reported as `failed` and the loop goes on. */
 export async function updateInstalled(
   catalog: Catalog, ctx: Ctx,
   opts: { name?: string; force: boolean; scope?: Scope; projectDir?: string },
-): Promise<Array<{ name: string; dir: string; result: 'updated' | 'current' | 'skipped-modified' | 'missing-from-catalog' }>> {
-  const out: Array<{ name: string; dir: string; result: 'updated' | 'current' | 'skipped-modified' | 'missing-from-catalog' }> = [];
+): Promise<UpdateResult[]> {
+  const out: UpdateResult[] = [];
   for (const i of await listInstalled(ctx, opts)) {
     if (opts.name !== undefined && i.name !== opts.name && i.marker.id !== opts.name) continue;
     const base = { name: i.name, dir: i.dir };
     const status = statusOf(i, catalog);
-    if (status === 'missing-from-catalog') { out.push({ ...base, result: status }); continue; }
+    const skill = catalog.byId(i.marker.id);
+    if (status === 'missing-from-catalog' || !skill) { out.push({ ...base, result: 'missing-from-catalog' }); continue; }
     if (status === 'modified' && !opts.force) { out.push({ ...base, result: 'skipped-modified' }); continue; }
     if (status === 'current') { out.push({ ...base, result: 'current' }); continue; }
-    const found = catalog.lookup(i.marker.id);
-    if (found.kind !== 'found') { out.push({ ...base, result: 'missing-from-catalog' }); continue; }
-    await installInto(found.skill, dirname(i.dir), basename(i.dir), ctx);
-    out.push({ ...base, result: 'updated' });
+    try {
+      await installInto(skill, dirname(i.dir), basename(i.dir), ctx);
+      out.push({ ...base, result: 'updated' });
+    } catch (e) {
+      out.push({ ...base, result: 'failed', message: e instanceof Error ? e.message : String(e) });
+    }
   }
   return out;
 }

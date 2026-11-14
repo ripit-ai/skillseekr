@@ -56,6 +56,11 @@ describe('Catalog lookup', () => {
   it('unknown is missing', () => {
     expect(c.lookup('nope')).toEqual({ kind: 'missing' });
   });
+  it('byId matches only an exact id, never a bare name', () => {
+    const m = cat([reg('a'), [sk('engineering/tdd', 'tdd')]]);
+    expect(m.byId('engineering/tdd')?.id).toBe('engineering/tdd');
+    expect(m.byId('tdd')).toBeUndefined();
+  });
 });
 
 describe('Catalog readFile', () => {

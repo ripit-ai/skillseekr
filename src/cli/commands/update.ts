@@ -16,9 +16,15 @@ export function registerUpdate(program: Command, cli: Cli): void {
       if (results.some((r) => r.result === 'missing-from-catalog')) {
         cli.io.err("hint: some installed skills are no longer in the catalog (registry removed, renamed or failing); check 'skillseekr registries'\n");
       }
-      if (isJson(cmd)) return printJson(cli.io, { results, stale: catalog.stale });
-      if (results.length === 0) return cli.io.out('no skills installed\n');
-      cli.io.out(table(results.map((r) => [r.name, r.result, r.dir])));
-      if (results.some((r) => r.result === 'skipped-modified')) cli.io.out("modified installs were skipped; use --force to overwrite them\n");
+      const failed = results.filter((r) => r.result === 'failed');
+      for (const f of failed) cli.io.err(`${f.name}: ${f.message} (${f.dir})\n`);
+      const failure = failed.length > 0 ? new CliError(`${failed.length} skill(s) failed to update`) : undefined;
+      if (isJson(cmd)) printJson(cli.io, { results, stale: catalog.stale });
+      else if (results.length === 0) cli.io.out('no skills installed\n');
+      else {
+        cli.io.out(table(results.map((r) => [r.name, r.result, r.dir])));
+        if (results.some((r) => r.result === 'skipped-modified')) cli.io.out("modified installs were skipped; use --force to overwrite them\n");
+      }
+      if (failure) throw failure;
     });
 }

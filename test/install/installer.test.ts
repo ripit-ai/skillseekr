@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, onTestFinished } from 'vitest';
 import { mkdir, writeFile, readFile, readdir, stat, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Ctx } from '../../src/context.js';
@@ -206,6 +206,12 @@ describe('listInstalled / statusOf', () => {
     expect(statusOf(await get(), catalogOf(skill))).toBe('modified');
     expect(statusOf(await get(), catalogOf())).toBe('missing-from-catalog');
   });
+  it('statusOf: an installed id that moved in the catalog is missing-from-catalog, not outdated', async () => {
+    const { src, ctx } = await setup();
+    await installSkill(await mkSkill(src, 'tdd'), 'project', ctx);
+    const moved = await mkSkill(await tmpDir(), 'engineering/tdd', { 'SKILL.md': 'moved' });
+    expect(statusOf((await listInstalled(ctx))[0]!, catalogOf(moved))).toBe('missing-from-catalog');
+  });
 });
 
 describe('removeInstalled', () => {
@@ -270,5 +276,35 @@ describe('updateInstalled', () => {
     const res = await updateInstalled(catalogOf(a2), ctx, { force: false, scope: 'user' });
     expect(res).toEqual([{ name: 'a', dir: join(home, '.copilot/skills/a'), result: 'updated' }]);
     expect(await exists(join(home, '.claude'))).toBe(false);
+  });
+  it('an installed id that moved in the catalog is missing-from-catalog and the loop does not throw', async () => {
+    const { src, ctx, proj } = await setup();
+    await installSkill(await mkSkill(src, 'tdd'), 'project', ctx);
+    const b = await mkSkill(src, 'b');
+    await installSkill(b, 'project', ctx);
+    const moved = await mkSkill(await tmpDir(), 'engineering/tdd', { 'SKILL.md': 'moved' });
+    const b2 = await mkSkill(await tmpDir(), 'b', { 'SKILL.md': 'new b' });
+    const res = await updateInstalled(catalogOf(moved, b2), ctx, { force: false });
+    expect(Object.fromEntries(res.map((r) => [r.name, r.result]))).toEqual({ tdd: 'missing-from-catalog', b: 'updated' });
+    expect(await readFile(join(proj, '.claude/skills/tdd/SKILL.md'), 'utf8')).toContain('hi');
+  });
+  it('one failing item is reported as failed with a message and the rest still update', async () => {
+    const { src, ctx, proj } = await setup();
+    for (const id of ['a', 'b']) await installSkill(await mkSkill(src, id), 'project', ctx);
+    const a2 = await mkSkill(await tmpDir(), 'a', { 'SKILL.md': 'new a' });
+    const b2 = await mkSkill(await tmpDir(), 'b', { 'SKILL.md': 'new b' });
+    const real = fsHooks.rename;
+    const spy = vi.spyOn(fsHooks, 'rename').mockImplementation(async (from, to) => {
+      if (String(to) === join(proj, '.claude/skills/a')) throw new Error('disk on fire');
+      return real(from, to);
+    });
+    onTestFinished(() => spy.mockRestore());
+    const res = await updateInstalled(catalogOf(a2, b2), ctx, { force: false });
+    expect(res).toEqual([
+      { name: 'a', dir: join(proj, '.claude/skills/a'), result: 'failed', message: 'disk on fire' },
+      { name: 'b', dir: join(proj, '.claude/skills/b'), result: 'updated' },
+    ]);
+    expect(await readFile(join(proj, '.claude/skills/a/SKILL.md'), 'utf8')).toContain('hi');
+    expect(await readFile(join(proj, '.claude/skills/b/SKILL.md'), 'utf8')).toBe('new b');
   });
 });
