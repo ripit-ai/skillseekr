@@ -11,6 +11,9 @@ export type InstallStatus = 'current' | 'outdated' | 'modified' | 'missing-from-
 
 const MARKER_FILE = '.skillseekr.json';
 
+/** Indirection so tests can simulate a failing rename. */
+export const fsHooks = { rename };
+
 export class InstallError extends Error {
   constructor(public code: 'name-conflict' | 'unmanaged-folder' | 'not-installed', message: string) {
     super(message);
@@ -21,8 +24,8 @@ export class InstallError extends Error {
 interface Target { dir: string; tool?: ToolId }
 
 function validateName(name: string): void {
-  if (name === '' || name === '.' || name === '..' || /[/\\\0]/.test(name)) {
-    throw new InstallError('name-conflict', `Skill name ${JSON.stringify(name)} cannot be used as an install folder: it must be a single path segment (not empty, ".", "..", and without "/", "\\" or NUL).`);
+  if (name === '' || name.startsWith('.') || /[/\\\0]/.test(name)) {
+    throw new InstallError('name-conflict', `Skill name ${JSON.stringify(name)} cannot be used as an install folder: it must be a single path segment (not empty, not starting with ".", and without "/", "\\" or NUL).`);
   }
 }
 
@@ -84,8 +87,19 @@ async function installInto(skill: SkillRecord, parent: string, folder: string, c
     };
     await writeFile(join(tmp, MARKER_FILE), JSON.stringify(marker, null, 2) + '\n');
     await checkSlot(dest, skill);
-    await rm(dest, { recursive: true, force: true });
-    await rename(tmp, dest);
+    let old: string | undefined;
+    if (await exists(dest)) {
+      old = await mkdtemp(join(parent, `.old-${folder}-`));
+      await rm(old, { recursive: true, force: true });
+      await fsHooks.rename(dest, old);
+    }
+    try {
+      await fsHooks.rename(tmp, dest);
+    } catch (e) {
+      if (old) await rename(old, dest).catch(() => {});
+      throw e;
+    }
+    if (old) await rm(old, { recursive: true, force: true }).catch(() => {});
   } catch (e) {
     await rm(tmp, { recursive: true, force: true });
     throw e;
@@ -123,7 +137,7 @@ export async function listInstalled(ctx: Ctx, opts?: { scope?: Scope; projectDir
     try { entries = await readdir(t.dir, { withFileTypes: true }); } catch { continue; }
     entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     for (const e of entries) {
-      if (!e.isDirectory()) continue;
+      if (!e.isDirectory() || e.name.startsWith('.')) continue;
       const dir = join(t.dir, e.name);
       const marker = await readMarker(dir);
       if (!marker) continue;

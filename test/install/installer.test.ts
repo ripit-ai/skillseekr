@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { mkdir, writeFile, readFile, readdir, stat, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Ctx } from '../../src/context.js';
@@ -6,7 +6,7 @@ import { Catalog, type SkillRecord } from '../../src/catalog/catalog.js';
 import { contentHash } from '../../src/catalog/hash.js';
 import type { ResolvedRegistry } from '../../src/resolve/resolve.js';
 import {
-  installSkill, listInstalled, statusOf, removeInstalled, updateInstalled, InstallError,
+  fsHooks, installSkill, listInstalled, statusOf, removeInstalled, updateInstalled, InstallError,
 } from '../../src/install/installer.js';
 import { presentTools, TOOL_TARGETS, PROJECT_SKILLS_DIR } from '../../src/install/targets.js';
 import { tmpDir } from '../helpers/tmp.js';
@@ -109,7 +109,7 @@ describe('installSkill', () => {
   it('rejects unsafe names before writing anything', async () => {
     const { src, ctx, proj } = await setup();
     const base = await mkSkill(src, 'tdd');
-    for (const name of ['', '.', '..', 'a/b', 'a\\b', 'a\0b', '../x']) {
+    for (const name of ['', '.', '..', '.hidden', '.tmp-x', 'a/b', 'a\\b', 'a\0b', '../x']) {
       const err = await installSkill({ ...base, name }, 'project', ctx).catch((e) => e);
       expect(err, JSON.stringify(name)).toBeInstanceOf(InstallError);
       expect(err.code).toBe('name-conflict');
@@ -132,6 +132,28 @@ describe('installSkill', () => {
     const root = join(proj, '.claude/skills');
     expect(await readdir(root)).toEqual(['tdd']);
     expect(await exists(join(root, 'tdd/references/a.md'))).toBe(true);
+  });
+  it('keeps the previous install when the final rename fails', async () => {
+    const { src, ctx, proj } = await setup();
+    await installSkill(await mkSkill(src, 'tdd'), 'project', ctx);
+    const v2 = await mkSkill(await tmpDir(), 'tdd', { 'SKILL.md': 'v2' });
+    const real = fsHooks.rename;
+    const spy = vi.spyOn(fsHooks, 'rename').mockImplementation(async (from, to) => {
+      if (String(from).includes('.tmp-')) throw new Error('boom');
+      return real(from, to);
+    });
+    await expect(installSkill(v2, 'project', ctx)).rejects.toThrow('boom');
+    spy.mockRestore();
+    const root = join(proj, '.claude/skills');
+    expect(await readdir(root)).toEqual(['tdd']);
+    expect(await readFile(join(root, 'tdd/references/a.md'), 'utf8')).toBe('A');
+    expect(await readdir(join(root, 'tdd'))).toContain('.skillseekr.json');
+  });
+  it('never leaves an .old-* folder after a successful replace', async () => {
+    const { src, ctx, proj } = await setup();
+    await installSkill(await mkSkill(src, 'tdd'), 'project', ctx);
+    await installSkill(await mkSkill(await tmpDir(), 'tdd', { 'SKILL.md': 'v2' }), 'project', ctx);
+    expect(await readdir(join(proj, '.claude/skills'))).toEqual(['tdd']);
   });
   it('refuses file paths that escape the skill folder', async () => {
     const { src, ctx, proj } = await setup();
@@ -156,6 +178,17 @@ describe('listInstalled / statusOf', () => {
     expect(all.map((i) => `${i.scope}:${i.name}:${i.modified}:${i.tool ?? ''}`).sort()).toEqual(['project:a:false:', 'project:b:true:', 'user:c:false:claude']);
     expect((await listInstalled(ctx, { scope: 'user' })).map((i) => i.name)).toEqual(['c']);
     expect((await listInstalled(ctx, { scope: 'project' })).map((i) => i.name).sort()).toEqual(['a', 'b']);
+  });
+  it('skips dot-prefixed in-flight folders even if they hold a valid marker', async () => {
+    const { src, ctx, proj } = await setup();
+    await installSkill(await mkSkill(src, 'a'), 'project', ctx);
+    const root = join(proj, '.claude/skills');
+    for (const n of ['.tmp-a-x', '.old-a-y']) {
+      await put(join(root, n), { 'SKILL.md': 'x' });
+      await writeFile(join(root, n, '.skillseekr.json'), await readFile(join(root, 'a/.skillseekr.json')));
+    }
+    expect((await listInstalled(ctx)).map((i) => i.dir)).toEqual([join(root, 'a')]);
+    expect((await updateInstalled(catalogOf(await mkSkill(src, 'a')), ctx, { force: false })).map((r) => r.name)).toEqual(['a']);
   });
   it('returns [] when nothing exists', async () => {
     const { ctx } = await setup();
