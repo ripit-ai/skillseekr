@@ -1,0 +1,6 @@
+{
+  "name": "skillseekr",
+  "version": "0.1.0",
+  "author": { "name": "ripit-ai" },
+  "description": "Skill registry search for Claude Code: the skillseekr MCP server plus a starter skill that tells the agent to search before specialized work"
+}

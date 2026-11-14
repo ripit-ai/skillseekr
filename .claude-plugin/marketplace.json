@@ -1,0 +1,14 @@
+{
+  "name": "skillseekr",
+  "description": "skillseekr: find and fetch agent skills from registries on demand",
+  "owner": {
+    "name": "ripit-ai"
+  },
+  "plugins": [
+    {
+      "name": "skillseekr",
+      "source": "./plugins/skillseekr",
+      "description": "Skill registry search for Claude Code: the skillseekr MCP server plus a starter skill that tells the agent to search before specialized work"
+    }
+  ]
+}

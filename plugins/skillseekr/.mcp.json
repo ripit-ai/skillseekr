@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "skillseekr": {
+      "command": "skillseekr",
+      "args": ["mcp"]
+    }
+  }
+}
