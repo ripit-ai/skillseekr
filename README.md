@@ -38,9 +38,9 @@ What it changes, per tool. A tool is only touched when it is detected.
 | Tool | MCP server registration | Starter skill |
 |---|---|---|
 | Claude Code | Preferred: `claude plugin marketplace add ripit-ai/skillseekr`, then `claude plugin install skillseekr@skillseekr --scope user`. Fallback if the plugin commands are missing or fail: `claude mcp add --scope user skillseekr -- skillseekr mcp` | Bundled in the plugin. Only with the `claude mcp add` fallback does setup copy it to `~/.claude/skills/skillseekr/` |
-| OpenCode | `mcp.skillseekr` (`type: "local"`, `command: ["skillseekr", "mcp"]`) in `~/.config/opencode/opencode.json` (or `opencode.jsonc` if that is the file you have). Works with OpenCode v1 and v2 config; an existing entry in either shape counts as registered | `~/.config/opencode/skills/skillseekr/` |
+| OpenCode | `mcp.skillseekr` (`type: "local"`, `command: ["skillseekr", "mcp"]`, `enabled: true`) in `~/.config/opencode/opencode.json` (or `opencode.jsonc` if that is the file you have). Works with OpenCode v1 and v2 config; an existing entry in either shape counts as registered | `~/.config/opencode/skills/skillseekr/` |
 | Copilot CLI | `mcpServers.skillseekr` in `~/.copilot/mcp-config.json` | `~/.copilot/skills/skillseekr/` |
-| VS Code (Copilot) | `servers.skillseekr` in VS Code's user `mcp.json`. Local: `~/Library/Application Support/Code/User/mcp.json` (macOS), `%APPDATA%/Code/User/mcp.json` (Windows), `~/.config/Code/User/mcp.json` (Linux), only if that folder exists. Remote (VS Code Server): `~/.vscode-server/data/User/mcp.json`, only if `~/.vscode-server` exists | none |
+| VS Code (Copilot) | `servers.skillseekr` in VS Code's user `mcp.json`. Local: `~/Library/Application Support/Code/User/mcp.json` (macOS), `%APPDATA%/Code/User/mcp.json` (Windows), `$XDG_CONFIG_HOME/Code/User/mcp.json` (Linux; `~/.config/Code/User/mcp.json` when `XDG_CONFIG_HOME` is unset), only if that folder exists. Remote (VS Code Server): `~/.vscode-server/data/User/mcp.json`, only if `~/.vscode-server` exists | none |
 
 Plus, if there is no config yet, `~/.config/skillseekr/config.jsonc` with one entry for the default organizational registries file (mode `0600`).
 
@@ -105,6 +105,10 @@ Any command also takes `--config <path>` for one run.
 
 `env_var` is the name of a variable, never the token.
 
+`skillseekr registries add --auth` offers `none`, `gh_cli`, `github_token` and `bearer`. For `basic`, add the entry and then edit its `auth` in the config file by hand.
+
+A failed `gh auth token` is retried after 30 seconds, so a running MCP server picks up a later `gh auth login` without a restart.
+
 **Include auth restriction.** A registries file reached through an include may use only `gh_cli` or no auth. Entries in it with `github_token`, `bearer` or `basic` are skipped and reported, and the variables they name are never read. Otherwise an included list could name `AWS_SECRET_ACCESS_KEY` and send it to a URL of its choosing. Those three auth types work only in your own local config.
 
 ### Cache, TTL and SHA pinning
@@ -112,6 +116,7 @@ Any command also takes `--config <path>` for one run.
 - Cache folder: `cache.dir` (`~` expanded), else `$XDG_CACHE_HOME/skillseekr`, else `~/.cache/skillseekr`. Mode `0700`.
 - A `ref` that is a commit SHA (7 to 40 hex characters) is immutable and never re-checked.
 - Any other ref (branch or tag) and every `http` source is re-checked after `ttl_seconds` (default 3600). `skillseekr sync` ignores the TTL once.
+- A running MCP server reloads its catalog when the config file changes or when `skillseekr sync` runs in another process (sync rewrites `<cache dir>/state/generation`). A load that had errors (for example an unreachable registry) is retried after at most 60 seconds, whatever the TTL.
 - `cache.enabled: false`, or `cache_enabled: false` on one registry, means a TTL of 0: re-check on every load. Fetched trees are still stored, because skills are served from disk.
 - Only the local config's `cache` section is used; a `cache` section in an included file is ignored.
 
@@ -125,26 +130,26 @@ To pin a registry for reproducible skills, set `ref` to a full commit SHA.
 4. Skills are indexed per registry. A skill ID is its slash-separated path relative to `skills_dir` (for `http`, the `skill_name`). A nested skill folder inside another skill folder is not indexed separately.
 5. Two skills with the same ID: the later registry wins. Same name at different paths are different skills.
 
-Every override is recorded and shown by `registries`, `show`, `doctor` and the `list_registries` and `get_skill` tools. Every skill also carries `via`, the chain of entry names from your config down to its registry, for example `ripit-ai > data-team > data-skills`. Since later entries win, put personal registries after the org entry to override org skills, or before it to let the org win.
+Every override is recorded. All of them (registry-name and skill-ID overrides) are shown by `registries`, `doctor` and the `list_registries` tool; a skill's own override (what it replaced) is shown by `search`, `show` and the `search_skills` and `get_skill` tools. Every skill also carries `via`, the chain of entry names from your config down to its registry, for example `ripit-ai → data-team → data-skills`, shown by `search`, `show`, `list`, `outdated` and the `search_skills`, `get_skill` and `list_installed` tools. Since later entries win, put personal registries after the org entry to override org skills, or before it to let the org win.
 
 A bare skill name works wherever an ID does, if exactly one skill has that name. If several do, you get the list of IDs to choose from.
 
 ## CLI
 
-`--json` (machine-readable output) and `--config <path>` work on every command.
+`--config <path>` works on every command. `--json` (machine-readable output) works on every command except `mcp`, which speaks MCP on stdio.
 
 | Command | What it does |
 |---|---|
 | `skillseekr setup [--tools <list>] [--yes] [--registry <owner/repo>] [--vscode-workspace <dir>]` | Config, MCP registration and starter skill for each tool found, then `doctor` |
-| `skillseekr search <query...> [--limit <n>]` | Search the resolved catalog (default 10 results) |
-| `skillseekr show <skill>` | Metadata, registry, `via`, overrides, file list and `SKILL.md` |
+| `skillseekr search <query...> [--limit <n>]` | Search the resolved catalog (default 10 results). Each row shows ID, registry, `via`, description, and `[overrides <registry> (via …)]` when the skill replaced another |
+| `skillseekr show <skill>` | Metadata, registry, `via`, overrides, file list and `SKILL.md` (a `SKILL.md` over 1 MB is shown as its size and path instead) |
 | `skillseekr install <skill> [--user]` | Copy a skill into `<project>/.claude/skills/` (default), or with `--user` into the personal skill folder of every detected tool |
 | `skillseekr remove <name> [--user]` | Remove an installed skill. Only folders skillseekr installed |
-| `skillseekr list [--user]` | Installed skills and whether each is current |
+| `skillseekr list [--user]` | Installed skills with registry, `via`, and whether each is current |
 | `skillseekr outdated [--user]` | Installed skills that are not current |
-| `skillseekr update [name] [--force] [--user]` | Update installs from the catalog. Locally edited installs are skipped unless `--force` |
-| `skillseekr registries` | The resolved registry list, with overrides |
-| `skillseekr registries add <name> --type <type> ...` | Add a registry to your config, keeping comments. Options: `--owner --repo --ref --skills-dir --path --url --skill-name --description --auth <none\|gh_cli\|github_token\|bearer> --env-var <NAME>` |
+| `skillseekr update [name] [--force] [--user]` | Update installs from the catalog. Locally edited installs are skipped unless `--force`. An install whose ID is no longer in the catalog (removed or moved to another path) is reported as `missing-from-catalog`. If one install fails, the rest still update; the failure is printed to stderr and the exit code is 1 |
+| `skillseekr registries` | The resolved registry list. NOTES shows `overrides <registry> (via …)` when a registry replaced another of the same name, and an `override:` line follows for every registry or skill override |
+| `skillseekr registries add <name> --type <type> ...` | Add a registry to your config, keeping comments. Options: `--owner --repo --ref --skills-dir --path --url --skill-name --description --auth <none\|gh_cli\|github_token\|bearer> --env-var <NAME>` (`basic` auth is set by editing the config) |
 | `skillseekr registries remove <name>` | Remove a registry from your config, keeping comments |
 | `skillseekr sync` | Re-check every registry now, ignoring the TTL |
 | `skillseekr doctor` | Check the config, registries, auth, includes, overrides, tool registration and skill folders |
@@ -162,11 +167,11 @@ Agents get exactly these tools from `skillseekr mcp`:
 | Tool | Input | Use |
 |---|---|---|
 | `search_skills` | `query`, optional `limit` | Find skills (metadata only) |
-| `get_skill` | `skill` (ID or unique name) | `SKILL.md` body, file list, cached folder path, registry, `via`, overrides. Installs nothing |
+| `get_skill` | `skill` (ID or unique name) | `SKILL.md` body, file list, cached folder path, registry, `via`, overrides. A `SKILL.md` over 1 MB comes back as `skillMd: {kind: "too_large", size, path}` instead of `body`. Installs nothing |
 | `read_skill_file` | `skill`, `path` | A supporting file. `..`, absolute paths and symlinks are refused; large or binary files return metadata |
-| `install_skill` | `skill`, optional `scope` (`project` or `user`) | Install, only when the user asks or agrees |
-| `list_installed` | optional `scope` | Installed skills with status |
-| `list_registries` | none | The resolved registries with `via`, SHA and overrides |
+| `install_skill` | `skill`, optional `scope` (`project` or `user`) | Install, only when the user asks or agrees. Returns the install folders and the tools that will load it (all three for `project`) |
+| `list_installed` | optional `scope` | Installed skills with `registry`, `via` and status |
+| `list_registries` | none | The resolved registries with `via`, SHA and what each replaced (`overrode`), plus every registry and skill override |
 
 Agents cannot remove skills or edit registries; those stay with you, in the CLI.
 

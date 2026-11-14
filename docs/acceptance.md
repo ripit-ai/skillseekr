@@ -65,6 +65,7 @@ Automated, partial. `test/e2e/stdio.test.ts` > "search → get → read_skill_fi
 - `test/resolve/resolve.test.ts` > "inaccessible registry is reported by name and others still load"
 - `test/doctor.test.ts` > "doctor reports config parse, each registry's access (fail names the registry), include loops, overrides (warn), unauthenticated GitHub sources (warn: rate limits), MCP registration per detected tool, and skill folder paths"
 - `test/cli/cli.test.ts` > "a sole inaccessible github-registry include exits 2 and names it; registries still prints first"
+- Recovery in a long-running server: `test/auth.test.ts` > "gh_cli does not keep a failure: after 30s it asks gh again and picks up a new login"; `test/engine.test.ts` > "a load with an error-level problem is retried after 60s even when the TTL is longer"
 
 ## AC-3: an agent finds and uses a relevant skill without being told its name
 
@@ -108,14 +109,16 @@ Manual, by eval harness. See the header of `evals/discovery/run.mjs` for the ful
 - Depth-first expansion, last wins, loops: `test/resolve/resolve.test.ts` > "loop is detected and reported, not infinite", "loop identity ignores owner/repo case and URL spelling"
 - Skill ID collisions: `test/catalog/catalog.test.ts` > "skill id collision: later registry wins, override recorded with both registries and vias", "registry overrides come first, then skill overrides"
 - Bare names: `test/catalog/catalog.test.ts` > "duplicate bare name is ambiguous with sorted ids"; `test/mcp/server.test.ts` > "get_skill with an ambiguous bare name returns isError with candidates"
-- Overrides visible: `test/catalog/search.test.ts` > "overrode names the replaced registry and via"; `test/engine.test.ts` > "registries() lists each source with via, sha, stale, skillCount, and overrides"; `test/doctor.test.ts` (overrides warn); `test/cli/cli.test.ts` > "show prints overrides when the skill replaced another"
+- Overrides visible: `test/catalog/search.test.ts` > "overrode names the replaced registry and via"; `test/engine.test.ts` > "registries() lists each source with via, sha, stale, skillCount, and overrides" (registry and skill overrides, and each registry's `overrode`); `test/mcp/server.test.ts` > "list_registries reports skill-id overrides as well as registry overrides (AC-6)"; `test/doctor.test.ts` (overrides warn); `test/cli/cli.test.ts` > "show prints overrides when the skill replaced another", "search rows show via and note what a hit overrode (AC-6, AC-7)", "registries prints registry and skill overrides (AC-6)"
 - Skill IDs match skills-mcp: `test/catalog/discover.test.ts` (ID, nesting and pruning tests)
 
 ## AC-7: `registry` and `via` everywhere a skill appears
 
 - `test/mcp/server.test.ts` > "search → get → read_skill_file round trip on the fixture catalog" (`registry`, `via` on search and get results)
 - `test/catalog/catalog.test.ts` > "skill id collision: later registry wins, override recorded with both registries and vias"
-- Manual spot check: `skillseekr search <word>` and `skillseekr show <skill>` print the registry and `via`.
+- `test/cli/cli.test.ts` > "search rows show via and note what a hit overrode (AC-6, AC-7)", "list shows status per install; outdated lists only non-current" (`VIA` column and `via` in `--json`), "show prints overrides when the skill replaced another"
+- `test/mcp/server.test.ts` > "install_skill installs into the project dir from roots, and list_installed reports it" (`via` on `list_installed`)
+- Manual spot check: `skillseekr search <word>`, `skillseekr list` and `skillseekr show <skill>` print the registry and `via`.
 
 ## AC-8: `policy: true` counts only in the local config
 
@@ -133,6 +136,7 @@ Automated:
 - Marker and copy: `test/install/installer.test.ts` > "project install copies the skill folder with a .skillseekr.json marker"; `test/e2e/stdio.test.ts` asserts `<project>/.claude/skills/pdf-forms/.skillseekr.json` through the built server.
 - Scopes and commands: `test/cli/cli.test.ts` > "install defaults to project scope; --user installs to present tools", "list shows status per install; outdated lists only non-current", "remove refuses unmarked folders (exit 1)"
 - `update` and local edits: `test/install/installer.test.ts` > "skips modified installs unless force", "updates outdated, reports current and missing-from-catalog, filters by name", "updates in the same user tool dir"; `test/cli/cli.test.ts` > "update skips modified without --force"
+- An installed ID that moved in the catalog, and per-item failures: `test/install/installer.test.ts` > "statusOf: an installed id that moved in the catalog is missing-from-catalog, not outdated", "an installed id that moved in the catalog is missing-from-catalog and the loop does not throw", "one failing item is reported as failed with a message and the rest still update"; `test/cli/cli.test.ts` > "update reports a failed item on stderr, still updates the rest, and exits 1"
 - Unmarked folders untouched: `test/install/installer.test.ts` > "refuses when the folder exists without a marker, leaving it untouched"; `test/install/installer.test.ts` removeInstalled tests
 
 Manual, that each tool loads a project install:
@@ -156,3 +160,11 @@ If a tool does not list the skill, record which tool and its version: that break
 - `test/sources/github.test.ts` > "offline with a previous resolution returns the cached tree with stale: true and a warning problem"; `test/sources/http.test.ts` > "serves stale from the cache when offline, embedding the error"
 - `test/cli/cli.test.ts` > "stale catalog prints a one-line warning to stderr"
 - Manual: run `skillseekr sync` online, disconnect the network, run `skillseekr search pdf` and `skillseekr show <skill>`. Expected: results appear and stderr says `warning: catalog may be stale (offline or failing sources)`. Through MCP, `search_skills` results carry `"stale": true`.
+
+## Also covered: a long-running MCP server stays current
+
+Not an acceptance criterion, but the MCP server runs for a whole tool session:
+
+- `test/engine.test.ts` > "a config file edit reloads the memo even before the TTL", "a sync (forced load) in another process reloads this engine; the syncing engine keeps its own result", "a load with an error-level problem is retried after 60s even when the TTL is longer", "concurrent callers after an expiry share one reload"
+- `test/auth.test.ts` > "gh_cli does not keep a failure: after 30s it asks gh again and picks up a new login"
+- Large `SKILL.md`: `test/mcp/server.test.ts` > "get_skill returns metadata instead of the body for a SKILL.md over 1 MB"; `test/cli/cli.test.ts` > "show prints metadata instead of a SKILL.md over 1 MB"; `test/catalog/discover.test.ts` > "a SKILL.md over 1 MB is indexed by folder name without parsing frontmatter, with a warning"
