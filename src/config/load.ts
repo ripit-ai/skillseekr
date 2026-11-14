@@ -49,7 +49,7 @@ function lineOf(text: string, offset: number): string {
 
 function parseRoot(text: string, file: string): { root?: Node; problems: Problem[] } {
   const errors: ParseError[] = [];
-  const root = parseTree(text, errors, { allowTrailingComma: true, disallowComments: false });
+  const root = parseTree(text.replace(/^\uFEFF/, ''), errors, { allowTrailingComma: true, disallowComments: false });
   if (errors.length > 0 || !root) {
     const problems = errors.length
       ? errors.map((e): Problem => ({
@@ -67,9 +67,17 @@ function child(obj: Node, key: string): Node | undefined {
 }
 
 export function parseRegistriesFile(text: string, opts: { file: string; isLocalConfig: boolean }): RegistriesFile {
+  return parseInternal(text, opts).file;
+}
+
+function parseInternal(text: string, opts: { file: string; isLocalConfig: boolean }): { root?: Node; file: RegistriesFile } {
+  const { root, problems } = parseRoot(text, opts.file);
+  if (!root) return { file: { registries: [], problems } };
+  return { root, file: parseRegistries(root, problems, opts) };
+}
+
+function parseRegistries(root: Node, problems: Problem[], opts: { file: string; isLocalConfig: boolean }): RegistriesFile {
   const { file, isLocalConfig } = opts;
-  const { root, problems } = parseRoot(text, file);
-  if (!root) return { registries: [], problems };
   if (root.type !== 'object') {
     return { registries: [], problems: [{ level: 'error', code: 'config/parse-error', file, message: `${file}: top level must be an object (offset ${root.offset})` }] };
   }
@@ -117,9 +125,8 @@ export async function loadConfig(ctx: Ctx): Promise<Config> {
       }],
     };
   }
-  const file = parseRegistriesFile(text.replace(/^﻿/, ''), { file: path, isLocalConfig: true });
+  const { root, file } = parseInternal(text, { file: path, isLocalConfig: true });
   const cache = { ...defaults };
-  const { root } = parseRoot(text.replace(/^﻿/, ''), path);
   const cacheNode = root && root.type === 'object' ? child(root, 'cache') : undefined;
   if (cacheNode) {
     const c = cacheSchema.safeParse(getNodeValue(cacheNode));

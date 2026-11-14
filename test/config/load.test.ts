@@ -124,4 +124,38 @@ describe('loadConfig', () => {
     expect(cfg.exists).toBe(true);
     expect(cfg.problems[0]).toMatchObject({ code: 'config/parse-error', file: p });
   });
+
+  it.each([
+    ['empty', ''],
+    ['whitespace-only', '  \n\t \n'],
+    ['comments-only', '// nothing here yet\n/* still nothing */\n'],
+  ])('%s config file yields a parse-error problem with the file path, no throw', async (_n, content) => {
+    const d = mkdtempSync(join(tmpdir(), 'ss-'));
+    const p = join(d, 'c.jsonc');
+    writeFileSync(p, content);
+    const cfg = await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }));
+    expect(cfg.exists).toBe(true);
+    expect(cfg.registries).toEqual([]);
+    expect(cfg.problems).toHaveLength(1);
+    expect(cfg.problems[0]).toMatchObject({ level: 'error', code: 'config/parse-error', file: p });
+    expect(cfg.problems[0].message).toContain(p);
+  });
+
+  it('parses a config file with a BOM', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'ss-'));
+    const p = join(d, 'c.jsonc');
+    writeFileSync(p, '\uFEFF{"registries":{"a":{"type":"http","url":"https://x/SKILL.md","skill_name":"a"}}}');
+    const cfg = await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }));
+    expect(cfg.problems).toEqual([]);
+    expect(cfg.registries.map(([n]) => n)).toEqual(['a']);
+  });
+
+  it('parses a config file with CRLF line endings and comments', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'ss-'));
+    const p = join(d, 'c.jsonc');
+    writeFileSync(p, '{\r\n // c\r\n "registries": {\r\n  "a": {"type":"http","url":"https://x/SKILL.md","skill_name":"a"},\r\n }\r\n}\r\n');
+    const cfg = await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }));
+    expect(cfg.problems).toEqual([]);
+    expect(cfg.registries.map(([n]) => n)).toEqual(['a']);
+  });
 });
