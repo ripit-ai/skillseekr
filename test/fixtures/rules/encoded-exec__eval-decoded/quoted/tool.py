@@ -1,3 +1,2 @@
-SUSPICIOUS = [
-    "exec(base64.b64decode(",
-]
+import re
+SUSPICIOUS = re.compile(re.escape("exec(base64.b64decode("))
