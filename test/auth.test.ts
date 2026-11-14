@@ -4,7 +4,7 @@ import type { Ctx, Exec } from '../src/context.js';
 
 const okExec = (calls: { n: number }): Exec => async () => { calls.n++; return { code: 0, stdout: 'ghtok\n', stderr: '' }; };
 const mk = (env: Record<string, string | undefined> = {}, exec?: Exec): Ctx => ({
-  env, home: '/h', cwd: '/w', http: {},
+  env, home: '/h', cwd: '/w', http: { get: async () => { throw new Error('unexpected http request'); } },
   exec: exec ?? (async () => ({ code: 0, stdout: '', stderr: '' })),
   now: () => 0, githubApi: 'https://api.github.com',
 });

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
-import type { Http } from './net/http.js';
+import { fetchHttp, type Http } from './net/http.js';
 
 export interface ExecResult { code: number; stdout: string; stderr: string }
 export type Exec = (
@@ -40,7 +40,7 @@ export function defaultContext(): Ctx {
     env,
     home: homedir(),
     cwd: process.cwd(),
-    http: {}, // placeholder until Task 4 provides the real implementation
+    http: fetchHttp(),
     exec: realExec,
     now: () => Date.now(),
     githubApi: env.SKILLSEEKR_GITHUB_API || 'https://api.github.com',

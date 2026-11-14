@@ -3,7 +3,7 @@ import { configPath, defaultCacheDir, expandHome } from '../src/paths.js';
 import type { Ctx } from '../src/context.js';
 
 const mk = (env: Record<string, string | undefined>): Ctx =>
-  ({ env, home: '/home/u', cwd: '/w', http: {}, exec: async () => ({ code: 0, stdout: '', stderr: '' }), now: () => 0, githubApi: 'https://api.github.com' });
+  ({ env, home: '/home/u', cwd: '/w', http: { get: async () => { throw new Error('unexpected http request'); } }, exec: async () => ({ code: 0, stdout: '', stderr: '' }), now: () => 0, githubApi: 'https://api.github.com' });
 
 describe('configPath', () => {
   it('SKILLSEEKR_CONFIG wins', () => {

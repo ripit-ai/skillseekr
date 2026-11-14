@@ -7,7 +7,7 @@ import type { GithubEntry, GithubRegistryEntry, HttpEntry } from '../../src/type
 import type { Ctx } from '../../src/context.js';
 
 const mkCtx = (env: Record<string, string | undefined>, home = '/home/u'): Ctx => ({
-  env, home, cwd: '/w', http: {}, exec: async () => ({ code: 0, stdout: '', stderr: '' }),
+  env, home, cwd: '/w', http: { get: async () => { throw new Error('unexpected http request'); } }, exec: async () => ({ code: 0, stdout: '', stderr: '' }),
   now: () => 0, githubApi: 'https://api.github.com',
 });
 const opts = { file: 'f', isLocalConfig: true };
