@@ -142,13 +142,13 @@ A bare skill name works wherever an ID does, if exactly one skill has that name.
 | Command | What it does |
 |---|---|
 | `skillseekr setup [--tools <list>] [--yes] [--registry <owner/repo>] [--vscode-workspace <dir>] [--trust <owner>=<ed25519:key>]` | Config, MCP registration and starter skill for each tool found, then `doctor` |
-| `skillseekr search <query...> [--limit <n>]` | Search the resolved catalog (default 10 results). Each row shows ID, registry, `via`, description, and `[overrides <registry> (via …)]` when the skill replaced another |
-| `skillseekr show <skill>` | Metadata, registry, `via`, overrides, file list and `SKILL.md` (a `SKILL.md` over 1 MB is shown as its size and path instead) |
+| `skillseekr search <query...> [--limit <n>]` | Search the resolved catalog (default 10 results). Each row shows ID, registry, `via`, description, and `[overrides <registry> (via …)]` when the skill replaced another, `[warnings: N]` for security warnings, and `[allowed by <label>: rule, rule]` when an `allow` applies |
+| `skillseekr show <skill>` | Metadata, registry, `via`, overrides, file list, a `Security` section (status and security findings), a separate `Quality` section, and `SKILL.md` (a `SKILL.md` over 1 MB is shown as its size and path instead) |
 | `skillseekr install <skill> [--user]` | Copy a skill into `<project>/.claude/skills/` (default), or with `--user` into the personal skill folder of every detected tool |
 | `skillseekr remove <name> [--user]` | Remove an installed skill. Only folders skillseekr installed |
-| `skillseekr list [--user]` | Installed skills with registry, `via`, and whether each is current |
-| `skillseekr outdated [--user]` | Installed skills that are not current |
-| `skillseekr update [name] [--force] [--user]` | Update installs from the catalog. Locally edited installs are skipped unless `--force`. An install whose ID is no longer in the catalog (removed or moved to another path) is reported as `missing-from-catalog`. If one install fails, the rest still update; the failure is printed to stderr and the exit code is 1 |
+| `skillseekr list [--user]` | Installed skills with registry, `via`, whether each is current, and its security status (`allowed [allowed by <label>: rule, …]` for an allowed copy; JSON adds `allowedBy` and `allowedRules`) |
+| `skillseekr outdated [--user]` | Installed skills that are not current, with the same columns as `list` |
+| `skillseekr update [name] [--force] [--user]` | Update installs from the catalog. Locally edited installs are skipped unless `--force`. An install whose ID is no longer in the catalog (removed or moved to another path) is reported as `missing-from-catalog`. If one install fails, the rest still update; the failure is printed to stderr and the exit code is 1. The exit code is also 1 when an installed copy is itself blocked (remove it); a blocked catalog version alone leaves the copy unchanged and exits 0 |
 | `skillseekr registries` | The resolved registry list. NOTES shows `overrides <registry> (via …)` when a registry replaced another of the same name, and an `override:` line follows for every registry or skill override |
 | `skillseekr registries add <name> --type <type> ...` | Add a registry to your config, keeping comments. Options: `--owner --repo --ref --skills-dir --path --url --skill-name --description --auth <none\|gh_cli\|github_token\|bearer> --env-var <NAME>` (`basic` auth is set by editing the config) |
 | `skillseekr registries remove <name>` | Remove a registry from your config, keeping comments |
@@ -156,10 +156,10 @@ A bare skill name works wherever an ID does, if exactly one skill has that name.
 | `skillseekr block [id] --reason <text> [--hash <sha256:…>]` | Deny a skill by ID, or one exact content hash under any ID, in your local config |
 | `skillseekr unblock [id] [--hash <sha256:…>]` | Remove a local block entry |
 | `skillseekr allow [id] [--reason <text>] [--yes] [--list] [--prune]` | Override a scanner block for one skill's exact content and rules. Needs a reason and a typed confirmation (`--yes` skips it). `--list` shows every entry, `--prune` drops local entries that match nothing |
-| `skillseekr scan [dir...] [--gate critical\|warning]` | Read-only scan of folders (default: project, tool and plugin skill folders). `--gate` exits 1 on a critical finding (`critical`) or on any finding (`warning`) |
+| `skillseekr scan [dir...] [--gate critical\|warning]` | Read-only scan of folders (default: the project's `.claude/skills`, `.github/skills`, `.agents/skills` and `.opencode/skills`, every tool's personal skill folder, `~/.agents/skills`, and installed plugins' skill folders). Quality findings are listed apart (`[quality]`, JSON `quality`) and never set a skill's status. `--gate` exits 1 on a critical security finding (`critical`) or on any security finding (`warning`). A `dir` that is missing or not a folder is a usage error (exit 2) |
 | `skillseekr keys create --out <dir> [--force]` | Create an ed25519 key pair (`skillseekr-private.pem`, `skillseekr-public.txt`) |
 | `skillseekr sign <skill-dir> --key <pem>` | Write `.skillseekr-signature.json` into a skill folder |
-| `skillseekr doctor` | Check the config, registries, auth, includes, overrides, tool registration and skill folders, plus blocked skills, local `allow` entries, near-duplicates, trust keys, policy problems and installed copies |
+| `skillseekr doctor` | Check the config, registries, auth, includes, overrides, tool registration and skill folders, plus blocked skills, local `allow` entries, near-duplicates, trust keys, policy problems (including a `policy: true` include that could not be loaded, whose blocks are then not in force: `policy:source:<name>`) and installed copies |
 | `skillseekr validate [path]` | Check a skill folder or a registries `.json`/`.jsonc` file (default: current folder) |
 | `skillseekr mcp` | Run the MCP server on stdio (the tools call this, not people) |
 
@@ -177,14 +177,15 @@ Agents get exactly these tools from `skillseekr mcp`:
 | `get_skill` | `skill` (ID or unique name) | `SKILL.md` body, file list, cached folder path, registry, `via`, overrides. A `SKILL.md` over 1 MB comes back as `skillMd: {kind: "too_large", size, path}` instead of `body`. Installs nothing |
 | `read_skill_file` | `skill`, `path` | A supporting file. `..`, absolute paths and symlinks are refused; large or binary files return metadata |
 | `install_skill` | `skill`, optional `scope` (`project` or `user`) | Install, only when the user asks or agrees. Returns the install folders and the tools that will load it (all three for `project`) |
-| `list_installed` | optional `scope` | Installed skills with `registry`, `via` and status |
+| `list_installed` | optional `scope` | Installed skills with `registry`, `via`, status, `security`, and `allowedBy`/`allowedRules` for an allowed copy |
 | `list_registries` | none | The resolved registries with `via`, SHA and what each replaced (`overrode`), plus every registry and skill override |
 
 Agents cannot remove skills, edit registries, or create or change `allow`, `block` or `trust`; those stay with you, in the CLI and the config file.
 
 Security labels in results:
 
-- `search_skills` hits and `get_skill` carry a `security` field: `status` (`clean`, `warned` or `allowed`), plus `allowedBy` (`user`, or the policy include's name) when an `allow` applies. `get_skill` also lists the `warnings` (and `allowedRules` for an allowed skill). `list_installed` reports the `security` status of each installed copy.
+- `search_skills` hits and `get_skill` carry a `security` field: `status` (`clean`, `warned` or `allowed`), plus `allowedBy` (`user`, or the policy include's name) and `allowedRules` when an `allow` applies. Search hits count the security `warnings`; `get_skill` lists them. `list_installed` reports the `security` status of each installed copy, with `allowedBy` and `allowedRules` when allowed.
+- Skill-quality notes (`quality/*`: missing or vague description, broken references, oversized files) are not security findings. They never make a skill `warned`: search hits carry a `quality` count and `get_skill` a separate `quality` list.
 - A blocked skill is missing from `search_skills`. `get_skill`, `read_skill_file` and `install_skill` return an error result (`isError: true`) shaped like this:
 
 ```json
@@ -212,17 +213,17 @@ skillseekr scans every skill on your machine, when it is indexed and before any 
 
 **Threat model.** Registry content is untrusted. The scan stops a skill that tries to hijack the agent (prompt injection, hiding actions from you), run downloaded code, read your credentials, or leak your environment. You can override it at your own risk, but an override never carries over to new content. It is not a sandbox (see [Known limits](#known-limits)).
 
-**What is scanned.** Every file in the skill folder, including `SKILL.md` frontmatter. Binary files (a NUL byte in the first 8 KB) are skipped, except `SKILL.md`, Markdown and script files, which are always scanned. A regular file over 10 MB, a skill whose files together go over the 12 MB scan budget, or a file that cannot be read gives the critical finding `integrity/unscannable-file`. The rules are fixed checks shipped with skillseekr: no AI model and no network calls, so a scan is fast, offline and gives the same result every time. Results are cached by content hash and rules version in `<cache>/scan/<version>/`.
+**What is scanned.** Every file in the skill folder, including `SKILL.md` frontmatter. A file is skipped as binary only when its first line holds a NUL byte (within the first 8 KB), it starts with a binary format's magic number (PNG, JPEG, GIF, PDF, ZIP, gzip, ELF, Mach-O, PE, RIFF, WASM), or it has a binary extension (`.png`, `.pdf`, `.zip`, `.woff2`, `.exe` and similar); any other file has its NUL bytes removed and is scanned. `SKILL.md`, Markdown, script files and files starting with `#!` are always scanned. A regular file over 10 MB, a skill whose files together go over the 12 MB scan budget, or a file that cannot be read gives the critical finding `integrity/unscannable-file`. The rules are fixed checks shipped with skillseekr: no AI model and no network calls, so a scan is fast, offline and gives the same result every time. Results are cached by content hash and rules version in `<cache>/scan/<version>/`.
 
 **What happens with the result.**
 
 - A **critical** finding blocks the skill. It is left out of search, and `get_skill`, `read_skill_file`, `install_skill` and `skillseekr install` refuse it, naming the rule, file and line. `show` and `doctor` list blocked skills with their findings.
-- A **warning** allows the skill but labels it everywhere it appears (`search`, `show`, `list`, `get_skill`). The starter skill tells the agent to mention warnings to you before following the skill.
+- A **warning** allows the skill but labels it everywhere it appears (`search`, `show`, `list`, `get_skill`). Only security findings count: quality findings are shown separately and never make a skill `warned`. The starter skill tells the agent to mention warnings to you before following the skill.
 - Installed copies are rescanned by `list`, `update` and `doctor`. A skill already in a tool's folder is loaded by that tool without skillseekr, so it can only be reported, with a hint to run `skillseekr remove`. `update` never installs blocked content.
 
 ### Rules
 
-Targets: `text` is Markdown, frontmatter and every non-script text file; `script` is `.sh .bash .zsh .py .js .mjs .cjs .ts .rb .pl .ps1`, files starting with `#!`, `Makefile`, `.envrc`, `justfile` and `package.json`; `all` is both; `frontmatter` checks each tool in `allowed-tools` or `tools`. A `script` rule never fires on text, and a `text` rule never fires on scripts.
+Targets: `text` is Markdown, frontmatter and every non-script text file; `script` is `.sh .bash .zsh .py .js .mjs .cjs .ts .rb .pl .ps1`, files starting with `#!`, `Makefile`, `.envrc`, `justfile` and `package.json`; `all` is both; `frontmatter` checks each tool in `allowed-tools` or `tools`. Two more kinds of file get the `script` rules as well as the `text` rules they already had: a file with no extension (except `LICENSE`, `LICENCE`, `NOTICE`, `README`, `CHANGELOG`, `AUTHORS` and `COPYING`), and a file that any text in the skill runs through an interpreter (`bash`, `sh`, `zsh`, `dash`, `ksh`, `source`, `.`, `python`, `node`, `deno`, `bun`, `ruby`, `perl`, `pwsh`, `powershell` followed by a path inside the skill, such as `bash scripts/setup` or `python3 tools/run.txt`). The script rules check such a file as the language of the interpreter that runs it (a `.py` file run with `bash` is checked as Python and as shell), and it is never skipped as binary. Apart from those files, a `script` rule never fires on text, and a `text` rule never fires on scripts.
 
 | Rule ID | Severity | Applies to |
 |---|---|---|

@@ -252,6 +252,25 @@ describe('mcp server', () => {
       await expect(stat(join(s.project, '.claude'))).rejects.toThrow();
     });
 
+    it('T8: get_skill on a blocked skill by bare name, or by a name shared with a blocked skill, never returns the body', async () => {
+      const md = (name: string) => `---\nname: ${name}\ndescription: ${name} helps with tasks\n---\nSECRET BODY ${name}\n`;
+      const s = await setup({ registries: { one: gh('one') }, repos: { 'o/one': { refs: { main: SHA }, commits: { [SHA]: {
+        'skills/team/lone/SKILL.md': md('lone'), 'skills/team/lone/run.sh': CURL,
+        'skills/a/twin/SKILL.md': md('twin'), 'skills/a/twin/run.sh': CURL, 'skills/b/twin/SKILL.md': md('twin'),
+      } } } } });
+      const bare = await s.call('get_skill', { skill: 'lone' });
+      expect(bare).toMatchObject({ isError: true, data: { error: 'blocked', id: 'team/lone' } });
+      const amb = await s.call('get_skill', { skill: 'twin' });
+      expect(amb).toMatchObject({ isError: true, data: { error: 'ambiguous', candidates: ['a/twin', 'b/twin'] } });
+      const byId = await s.call('get_skill', { skill: 'a/twin' });
+      expect(byId).toMatchObject({ isError: true, data: { error: 'blocked', id: 'a/twin' } });
+      for (const r of [bare, amb, byId]) {
+        expect(JSON.stringify(r)).not.toContain('SECRET BODY');
+        expect(r.data).not.toHaveProperty('body');
+      }
+      expect((await s.call('get_skill', { skill: 'b/twin' })).data.body).toContain('SECRET BODY twin');
+    });
+
     it('a deny block gives empty findings and the deny reason', async () => {
       const s = await setup({ repos: secRepos(), registries: { one: gh('one') } });
       await writeConfig(s.dir, { block: [{ id: 'fine', reason: 'incident 42', added: '2026-11-14' }] });

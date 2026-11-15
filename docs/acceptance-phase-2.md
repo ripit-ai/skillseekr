@@ -35,13 +35,16 @@ Test file paths are relative to the repo root. Rules, values and commands are do
 - `test/install/installer.test.ts` > "P2-1: installing a blocked skill throws blocked and creates nothing"
 - `test/cli/cli.test.ts` > "P2-8: block by id removes the skill from search and install exits 1; unblock restores it" (CLI `install` refusal)
 - `test/e2e/stdio.test.ts` > "a skill with curl | sh is hidden from search and get_skill returns the blocked shape" (built binary over real stdio: rule `download-and-run/curl-pipe-shell`, file `scripts/x.sh`, line 1)
-- Every registry type: `test/engine.test.ts` > "a blocked skill from an http registry".
+- Every registry type. `github` (the GitHub path, through the fake GitHub API): `test/engine.test.ts` > "P2-1: a skill with curl | sh in a script is absent from search; lookup finds it blocked with rule, file and line", "a blocked skill served from the index and scan caches by a fresh engine" (pinned SHA), "a blocked skill on a stale load (re-check fails, the cache is used)" and "P2-2: a branch ref that advances to a commit with a critical is blocked after TTL expiry, without sync". `http`: `test/engine.test.ts` > "a blocked skill from an http registry".
+- Renamed and extensionless scripts (P2-R19): `test/scan/bypass.test.ts` > "the review probe (scripts/setup run by bash) is critical without a NUL", "... with a NUL on line 2", "an extensionless file is a script even when nothing runs it", "a renamed script run as `%s` gets the script rules", "an interpreter-run file is lexed as that language: shell joins, no foreign docstrings", "binary only with a NUL in the first line, a binary magic number or a binary extension".
+- `test/mcp/server.test.ts` > "T8: get_skill on a blocked skill by bare name, or by a name shared with a blocked skill, never returns the body".
 
 ## P2-2: an update that adds a critical pattern is blocked on its own
 
 - `test/engine.test.ts` > "P2-2: a branch ref that advances to a commit with a critical is blocked after TTL expiry, without sync"
 - `test/install/installer.test.ts` > "P2-2: catalog moves to blocked v2: update is blocked, copy untouched, list shows the old copy clean"
 - `test/install/installer.test.ts` > "Review Focus 5: a hand-edited copy with curl | sh is blocked, by list and by update"
+- `test/cli/cli.test.ts` > "Minor 3: update exits 1 when an installed copy is itself blocked, 0 when only the catalog version is"
 - `test/doctor.test.ts` > "doctor reports blocked skills, local allow entries with added date, near-duplicates, trust keys and policy problems; a blocked installed copy fails"
 
 ## P2-3: an `allow` is tied to one content hash and the named rules
@@ -49,7 +52,7 @@ Test file paths are relative to the repo root. Rules, values and commands are do
 - `test/policy/evaluate.test.ts` > "allow with right hash and rules lifts the block (extra rules fine)"
 - `test/policy/evaluate.test.ts` > "hash differing by one character does not lift; note names content change"
 - `test/policy/evaluate.test.ts` > "a new critical rule not in rules keeps it blocked; note names it"
-- `test/cli/cli.test.ts` > "P2-3: allow --yes then search shows [allowed by user]; allow --list and --json"
+- `test/cli/cli.test.ts` > "P2-3: allow --yes then search shows [allowed by user: rules]; allow --list and --json" (also the allowed label on `list` and `outdated`, table and JSON)
 - `test/cli/cli.test.ts` > "P2-3: allow --prune drops a stale local entry and keeps a live one"
 
 ## P2-4: where `allow`, `block` and `trust` are honoured
@@ -59,6 +62,8 @@ Test file paths are relative to the repo root. Rules, values and commands are do
 - `test/resolve/resolve.test.ts` > "allow/block in a depth-2 include under a policy include are ignored and reported"
 - `test/resolve/resolve.test.ts` > "policy:true in an included file has no effect"
 - `test/doctor.test.ts` > "policy:ignored is reported for allow/block entries in an include that is not a policy include"
+- `test/resolve/resolve.test.ts` > "Minor 4: a policy include that cannot be fetched or parsed is an error problem saying its blocks are not in force", "Minor 4: a policy include served from the stale cache is honoured, with no source-unavailable problem"
+- `test/doctor.test.ts` > "Minor 4: a policy include that fails to load is a fail under policy:source:<name>"
 - `test/mcp/server.test.ts` > "P2-4: no MCP tool can change allow/block: six tools, and arbitrary calls leave the config byte-identical"
 - `test/mcp/server.test.ts` > "listTools returns exactly the six tool names"
 
@@ -67,7 +72,9 @@ Test file paths are relative to the repo root. Rules, values and commands are do
 - `test/mcp/server.test.ts` > "P2-5: a warned skill carries security.warnings in search and get_skill; an allowed one carries allowedBy and allowedRules"
 - `test/cli/cli.test.ts` > "P2-5: show works for a blocked skill and prints findings; warnings label search; list shows security"
 - `test/cli/cli.test.ts` > "P2-5: a blocked installed copy shows blocked in list and outdated, with the remove hint on stderr"
-- `test/catalog/catalog.test.ts` > "search skips blocked skills; hits carry status, allowedBy label and the warning count"
+- `test/catalog/catalog.test.ts` > "search skips blocked skills; hits carry status, allowedBy label, allowedRules and the warning count"
+- `test/mcp/server.test.ts` > "P2-5: a warned skill carries security.warnings in search and get_skill; an allowed one carries allowedBy and allowedRules" (also `list_installed` `allowedBy`/`allowedRules`)
+- `test/cli/cli.test.ts` > "Minor 2: block reasons read \"<prefix>: <reason>.\" with one period, never \"..\""
 
 ## P2-6: bad skills are blocked; legitimate skills are not
 
@@ -115,7 +122,9 @@ The false-positive budget is **0 blocks** across `test/fixtures/legit`, `evals/d
 
 - `test/cli/cli.test.ts` > "P2-11: bare scan reports user, copilot, unmarked and plugin skills, never touches HOME; --gate and --json"
 - `test/cli/cli.test.ts` > "P2-11: with a real config the cache lives outside the scanned folders and the scanned trees are unchanged"
-- `test/cli/cli.test.ts` > "--gate warning exits 1 on any finding, but not on a clean folder; explicit dirs may be a skill or a root"
+- `test/cli/cli.test.ts` > "--gate warning exits 1 on any security finding, but not on a clean folder; explicit dirs may be a skill or a root"
+- `test/cli/cli.test.ts` > "Minor 1: scan with a missing or non-directory path is a usage error (exit 2) naming it"
+- `test/scan/folders.test.ts` > "P2-11: project .github/.agents/.opencode skills and ~/.agents/skills are targets, deduped by real path"
 - `test/scan/folders.test.ts` > "returns only existing folders: project, every tool, and plugin skill folders with labels"
 
 Manual check on a real machine:
@@ -135,6 +144,7 @@ Expected: one line per skill folder found (`CLEAN`, `WARNING` or `CRITICAL`, wit
 - `test/engine.test.ts` > "owners without a trusted key are not checked"
 - `test/sign/sign.test.ts` > "sign then verify is ok", "changing one byte names the file", "another key fails; one matching key among several passes (rotation)"
 - `test/setup/setup.test.ts` > "setup --trust writes the trust entry with the default config, and a second run changes nothing"
+- `test/setup/setup.test.ts` > "T12: setup --trust merges into a config that appeared between plan and apply, never over it", "T12: setup --trust leaves an unparseable config that appeared alone and reports it"
 - `test/setup/setup.test.ts` > "setup --trust merges keys for the same owner without duplicates and keeps comments"
 - `test/setup/setup.test.ts` > "setup --trust with a bad key or spec throws and writes nothing"
 
@@ -142,6 +152,8 @@ Expected: one line per skill folder found (`CLEAN`, `WARNING` or `CRITICAL`, wit
 
 - `test/scan/quality.test.ts` > "bad/notes-v2 gets description-no-trigger", "bad/team-helper gets description-hijack", "bad/schema-check gets broken-reference naming each missing path, with line numbers", "flags a 1.5 MB file as oversized-file"
 - `test/cli/cli.test.ts` > "P2-13: scan shows quality warnings for bad/notes-v2; show lists them"
-- `test/mcp/server.test.ts` > "get_skill shows quality warnings in security.warnings"
+- `test/mcp/server.test.ts` > "P2-R20: get_skill returns quality findings apart from security.warnings"
+- `test/engine.test.ts` > "P2-R20: quality findings are kept apart from security and never make a skill warned"
+- `test/scan/quality.test.ts` > "P2-R20: the starter skill gets no quality findings; at/before/whenever/during and \"when working\" are triggers"
 - `test/scan/quality.test.ts` > "pairs descriptions that differ by one word, sorted, and not unrelated ones"
 - `test/doctor.test.ts` > "doctor reports blocked skills, local allow entries with added date, near-duplicates, trust keys and policy problems; a blocked installed copy fails"

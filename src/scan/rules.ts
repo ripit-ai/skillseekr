@@ -9,7 +9,8 @@ export const RULES_VERSION = '2';
 
 /**
  * Where a rule applies. `text`: Markdown, frontmatter and every other non-script text file. `script`: see
- * scan.ts `isScript` (script extensions, a `#!` first line, Makefile, .envrc, justfile, package.json). `all`:
+ * scan.ts `SkillScan.add` (script extensions, a `#!` first line, Makefile, .envrc, justfile, package.json; and, in
+ * addition to `text`, extensionless files and files the skill runs through an interpreter, P2-R19). `all`:
  * both. `frontmatter`: each tool named by `allowed-tools`/`tools` in a Markdown file's frontmatter (the regex
  * is tested against one tool at a time).
  */
