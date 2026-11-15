@@ -5,6 +5,7 @@ import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { scanFiles, scanSkillDir, type ScanResult } from '../../src/scan/scan.js';
 import { tmpDir } from '../helpers/tmp.js';
+import { SCAN_BUDGET_MS, SCAN_TEST_TIMEOUT_MS } from './timeBudget.js';
 
 const S = '---\nname: x\ndescription: Use when testing.\n---\n# X\n';
 const scan = (path: string, text: string | Buffer) => scanFiles([{ path, content: Buffer.isBuffer(text) ? text : Buffer.from(text) }]);
@@ -225,9 +226,9 @@ describe('per-skill budget and unreadable files', () => {
     const content = Buffer.from(line.repeat(Math.floor((10 * MB) / line.length)));
     const t = performance.now();
     const r = scanFiles(['d.sh', 'b.sh', 'c.sh', 'a.sh'].map((path) => ({ path, content })));
-    expect(performance.now() - t).toBeLessThan(2000);
+    expect(performance.now() - t).toBeLessThan(SCAN_BUDGET_MS);
     expect(r.findings).toEqual(['b.sh', 'c.sh', 'd.sh'].map((file) => ({ rule: 'integrity/unscannable-file', severity: 'critical', file, line: 1, message: 'exceeds per-skill scan budget' })));
-  });
+  }, SCAN_TEST_TIMEOUT_MS);
 
   it('scanSkillDir applies the budget to files read from disk', async () => {
     const dir = await tmpDir();

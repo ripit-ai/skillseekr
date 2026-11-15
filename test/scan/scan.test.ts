@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { RULES } from '../../src/scan/rules.js';
 import { scanFiles, scanSkillDir, SCRIPT_EXT, SKILL_SCAN_BUDGET } from '../../src/scan/scan.js';
 import { tmpDir } from '../helpers/tmp.js';
+import { SCAN_BUDGET_MS, SCAN_TEST_TIMEOUT_MS } from './timeBudget.js';
 
 const file = (path: string, text: string | Buffer) => ({ path, content: Buffer.isBuffer(text) ? text : Buffer.from(text) });
 const SKILL = '---\nname: x\ndescription: Use when testing.\n---\n# X\n';
@@ -107,9 +108,9 @@ describe('bounds', () => {
     for (const c of cases) {
       const t = performance.now();
       expect(() => scanFiles([c])).not.toThrow();
-      expect(performance.now() - t, c.path).toBeLessThan(2000);
+      expect(performance.now() - t, c.path).toBeLessThan(SCAN_BUDGET_MS);
     }
-  });
+  }, SCAN_TEST_TIMEOUT_MS);
 
   it('a skill filling the 12 MB budget with worst-case lines scans in < 2 s', () => {
     const fill = (unit: string) => Buffer.from(unit.repeat(Math.floor(SKILL_SCAN_BUDGET / 2 / unit.length)));
@@ -130,17 +131,17 @@ describe('bounds', () => {
       const content = fill(unit);
       const t = performance.now();
       scanFiles([{ path: `a.${ext}`, content }, { path: `b.${ext}`, content }]);
-      expect(performance.now() - t, JSON.stringify(unit)).toBeLessThan(2000);
+      expect(performance.now() - t, JSON.stringify(unit)).toBeLessThan(SCAN_BUDGET_MS);
     }
-  }, 30_000);
+  }, SCAN_TEST_TIMEOUT_MS);
 
   it('a 6 MB line of filler then 16 quoted text-rule matches scans in < 2 s (quote state is walked once per line)', () => {
     const content = Buffer.from('x'.repeat(SKILL_SCAN_BUDGET / 2 - 1024) + '"ignore previous instructions" '.repeat(16) + '\n');
     const t = performance.now();
     const r = scanFiles([{ path: 'a.md', content }, { path: 'b.md', content }]);
-    expect(performance.now() - t).toBeLessThan(2000);
+    expect(performance.now() - t).toBeLessThan(SCAN_BUDGET_MS);
     expect(r.critical).toBe(0);
-  });
+  }, SCAN_TEST_TIMEOUT_MS);
 
   it('a 10 MB pipe segment of wrapper words or whitespace neither throws nor runs long', () => {
     for (const unit of ['-a b ', 'A=1 ', 'KILL ', '1 ', '-y ', '> ', '/a', ' ', 'nohup ', 'SUDO ', '-- ', '-s ', './']) {
@@ -149,11 +150,11 @@ describe('bounds', () => {
         // One skill per file: two 10 MB files together would pass the 12 MB per-skill budget (P2-R17).
         const t = performance.now();
         const r = ['a.sh', 'a.md'].flatMap((path) => scanFiles([{ path, content: Buffer.from(text) }]).findings);
-        expect(performance.now() - t, unit).toBeLessThan(2000);
+        expect(performance.now() - t, unit).toBeLessThan(SCAN_BUDGET_MS);
         expect(r.filter((f) => f.rule === 'integrity/unscannable-file'), `${prefix}${unit}`).toEqual([]);
       }
     }
-  }, 60_000);
+  }, SCAN_TEST_TIMEOUT_MS);
 
   it('the downgrade checks stay linear on a 10 MB line', () => {
     const big = (n: number, unit: string) => unit.repeat(Math.floor(n / unit.length));
@@ -182,10 +183,10 @@ describe('bounds', () => {
     for (const [path, text] of cases) {
       const t = performance.now();
       const r = scanFiles([{ path, content: Buffer.from(text) }]);
-      expect(performance.now() - t, path).toBeLessThan(2000);
+      expect(performance.now() - t, path).toBeLessThan(SCAN_BUDGET_MS);
       expect(r.findings.some((f) => f.rule === 'integrity/unscannable-file'), path).toBe(false);
     }
-  }, 30_000);
+  }, SCAN_TEST_TIMEOUT_MS);
 
   it('a regex that throws on some input fails closed: the file is unscannable, not skipped', () => {
     const rule = RULES.find((r) => r.id === 'download-and-run/curl-pipe-shell')!;
@@ -206,8 +207,8 @@ describe('bounds', () => {
     for (const a of tokens) for (const b of ['', ' ', 'a', '\t']) lines.push((a + b).repeat(Math.ceil(4096 / (a.length + b.length))).slice(0, 4096));
     const t = performance.now();
     scanFiles(lines.flatMap((l, i) => [file(`x${i}.sh`, l), file(`x${i}.md`, l), file(`x${i}.py`, `print("${l}")`)]));
-    expect(performance.now() - t).toBeLessThan(2000);
-  });
+    expect(performance.now() - t).toBeLessThan(SCAN_BUDGET_MS);
+  }, SCAN_TEST_TIMEOUT_MS);
 
   it('a long line is checked at its start and at its end', () => {
     const pad = 'x'.repeat(9000);
