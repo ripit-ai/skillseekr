@@ -785,6 +785,26 @@ describe('cli scan', () => {
     expect((await s.run('scan', join(s.dir, 'empty-nothing'))).out).toBe('no skills found to scan\n');
   });
 
+  it('P2-11: with a real config the cache lives outside the scanned folders and the scanned trees are unchanged', async () => {
+    const s = await setup({ registries: {} });
+    await homeWith(s);
+    const before = await tree(s.ctx.home);
+    expect((await s.run('scan')).code).toBe(0);
+    expect(await tree(s.ctx.home)).toEqual(before);
+    expect((await readdir(join(s.dir, 'cache', 'scan'))).length).toBe(1); // the cache was used
+  });
+
+  it('a cache dir inside a scanned folder is not used', async () => {
+    const s = await setup({ raw: '{}' });
+    await homeWith(s);
+    const inner = join(s.ctx.home, '.claude', 'skills', 'cache-here');
+    await writeFile(s.path, JSON.stringify({ cache: { dir: inner }, registries: {} }));
+    const before = await tree(s.ctx.home);
+    expect((await s.run('scan')).code).toBe(0);
+    expect(await tree(s.ctx.home)).toEqual(before);
+    await expect(lstat(inner)).rejects.toThrow();
+  });
+
   it('P2-13: scan shows quality warnings for bad/notes-v2; show lists them', async () => {
     const s = await setup({ registries: { one: gh('one') } });
     const r = await s.run('scan', join(process.cwd(), 'test/fixtures/skillyard/bad/notes-v2'));

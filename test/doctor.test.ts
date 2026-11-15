@@ -107,7 +107,8 @@ describe('doctor', () => {
         'skills/ok/SKILL.md': '---\nname: ok\ndescription: unrelated thing for grepping logs when the user asks about stack traces\n---\n',
       } } },
     });
-    const ctx: Ctx = { ...e.ctx, http: github.http };
+    const proj = join(e.home, 'proj');
+    const ctx: Ctx = { ...e.ctx, http: github.http, cwd: proj };
     await writeFile(e.file, JSON.stringify({
       cache: { dir: join(e.home, 'cache') },
       registries: { p: { type: 'github', owner: 'o', repo: 'p', skills_dir: 'skills', ref: 'main' } },
@@ -119,8 +120,16 @@ describe('doctor', () => {
     await writeFile(join(inst, 'SKILL.md'), md('bad'));
     await writeFile(join(inst, 'run.sh'), BAD);
     await writeFile(join(inst, '.skillseekr.json'), JSON.stringify({ id: 'bad', name: 'badcopy', registry: 'p', via: ['p'], contentHash: 'sha256:x', installedAt: '2026-01-01T00:00:00Z' }));
+    const pinst = join(proj, '.claude', 'skills', 'projcopy');
+    await mkdir(pinst, { recursive: true });
+    await writeFile(join(pinst, 'SKILL.md'), md('bad'));
+    await writeFile(join(pinst, 'run.sh'), BAD);
+    await writeFile(join(pinst, '.skillseekr.json'), JSON.stringify({ id: 'bad', name: 'projcopy', registry: 'p', via: ['p'], contentHash: 'sha256:x', installedAt: '2026-01-01T00:00:00Z' }));
     const { checks } = await doctor(createEngine(ctx), ctx);
     const by = (id: string) => checks.find((c) => c.id === id);
+    expect(by('security:installed:projcopy:project')).toMatchObject({ status: 'fail' });
+    expect(by('security:installed:projcopy:project')?.message).toContain('skillseekr remove projcopy');
+    expect(by('security:installed:projcopy:project')?.message).not.toContain('--user');
     expect(by('security:blocked')).toMatchObject({ status: 'warn' });
     expect(by('security:blocked')?.message).toContain('bad');
     expect(by('policy:allow')).toMatchObject({ status: 'warn' });
@@ -129,13 +138,27 @@ describe('doctor', () => {
     expect(by('quality:near-duplicates')?.message).toMatch(/dupa ~ dupb/);
     expect(by('trust:acme')).toMatchObject({ status: 'ok' });
     expect(by('trust:acme')?.message).toContain('2 trusted keys');
-    expect(by('security:installed:badcopy')).toMatchObject({ status: 'fail' });
-    expect(by('security:installed:badcopy')?.message).toContain('skillseekr remove badcopy --user');
+    expect(by('security:installed:badcopy:user:claude')).toMatchObject({ status: 'fail' });
+    expect(by('security:installed:badcopy:user:claude')?.message).toContain('skillseekr remove badcopy --user');
   });
 
   it('a clean setup has none of the security, policy or duplicate checks', async () => {
     const e = await env(JSON.stringify({ registries: {} }));
     const ids = (await e.run()).checks.map((c) => c.id);
     expect(ids.filter((i) => /^(security|policy|quality|trust)/.test(i))).toEqual([]);
+  });
+
+  it('policy:ignored is reported for allow/block entries in an include that is not a policy include', async () => {
+    const e = await env(undefined);
+    const github = fakeGithub({
+      'o/inc': { refs: { main: SHA }, commits: { [SHA]: { 'registries.jsonc': JSON.stringify({
+        registries: {}, block: [{ id: 'x', reason: 'r', added: '2026-01-01' }] }) } } },
+    });
+    const ctx: Ctx = { ...e.ctx, http: github.http };
+    await writeFile(e.file, JSON.stringify({ registries: { inc: { type: 'github-registry', owner: 'o', repo: 'inc', ref: 'main' } } }));
+    const { checks } = await doctor(createEngine(ctx), ctx);
+    const c = checks.find((x) => x.id === 'policy:ignored');
+    expect(c).toMatchObject({ status: 'warn' });
+    expect(c?.message).toContain('block entries');
   });
 });

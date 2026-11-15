@@ -104,7 +104,7 @@ export async function doctor(engine: Engine, ctx: Ctx, opts: { vscodeWorkspace?:
   }
 
   // Skill folders of present tools.
-  const installed = await listInstalled(ctx, { scope: 'user' });
+  const installed = await listInstalled(ctx, { projectDir: ctx.cwd, catalog });
   for (const tool of await presentTools(ctx)) {
     const dir = join(ctx.home, TOOL_TARGETS[tool].userSkillsDir);
     let isDir: boolean | undefined;
@@ -113,7 +113,7 @@ export async function doctor(engine: Engine, ctx: Ctx, opts: { vscodeWorkspace?:
     const starter = starterDir(ctx, tool);
     let starterPresent = false;
     try { await lstat(starter); starterPresent = true; } catch { /* none */ }
-    const mine = installed.filter((i) => i.tool === tool);
+    const mine = installed.filter((i) => i.scope === 'user' && i.tool === tool);
     const starterManaged = mine.find((i) => i.dir === starter && i.marker.id === STARTER_NAME);
     if (starterPresent && !starterManaged) {
       add(`skills-dir:${tool}`, 'warn', `${starter} exists without a skillseekr marker (or holds another skill); setup leaves it alone, so the starter skill is not installed there`);
@@ -127,8 +127,8 @@ export async function doctor(engine: Engine, ctx: Ctx, opts: { vscodeWorkspace?:
   // Security, policy and quality.
   const blocked = catalog.blocked();
   if (blocked.length > 0) add('security:blocked', 'warn', `${blocked.length} blocked ${blocked.length === 1 ? 'skill' : 'skills'}: ${list(blocked.map((b) => `${b.id} (${blockedReason(b.security)})`))}`);
-  for (const i of await listInstalled(ctx, { scope: 'user', catalog })) {
-    if (i.security?.status === 'blocked') add(`security:installed:${i.name}`, 'fail', `installed copy at ${i.dir} is blocked: ${blockedReason(i.security)}; ${removeHint(i)}`);
+  for (const i of installed) {
+    if (i.security?.status === 'blocked') add(`security:installed:${i.name}:${i.scope}${i.tool ? `:${i.tool}` : ''}`, 'fail', `installed copy at ${i.dir} is blocked: ${blockedReason(i.security)}; ${removeHint(i)}`);
   }
   const allows = catalog.policy.sources.filter((s) => s.source.kind === 'local').flatMap((s) => Object.entries(s.allow));
   if (allows.length > 0) add('policy:allow', 'warn', `${allows.length} local allow ${allows.length === 1 ? 'entry' : 'entries'}: ${list(allows.map(([id, a]) => `${id} (added ${a.added}; rules: ${a.rules.join(', ')})`))}`);

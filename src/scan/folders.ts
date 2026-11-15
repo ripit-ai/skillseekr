@@ -12,38 +12,76 @@
 //   documents no plugin skill location, so none is added.
 // - OpenCode: https://opencode.ai/docs/plugins/ documents plugin folders (.opencode/plugins, ~/.config/opencode/plugins)
 //   but says nothing about plugins bundling skills, so no plugin skill location is added.
-import { lstat, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, readdir, readFile } from 'node:fs/promises';
+import { isAbsolute, join, resolve } from 'node:path';
 import type { Ctx } from '../context.js';
+import { expandHome } from '../paths.js';
 import { PROJECT_SKILLS_DIR, TOOL_IDS, TOOL_TARGETS } from '../install/targets.js';
 
 export interface ScanTarget { label: string /* e.g. "claude user", "plugin superpowers@5.0.0" */; dir: string /* a skills root */ }
 
 const MAX_DEPTH = 6;
+const MAX_MANIFEST_BYTES = 64 * 1024;
 /** Plugin trees under the plugins root that hold installed plugin files. */
 const PLUGIN_TREES = ['cache', 'synced'];
 const SKIP = new Set(['node_modules', '.git', '.trash']);
 
+const isFile = async (p: string): Promise<boolean> => { try { return (await lstat(p)).isFile(); } catch { return false; } };
 const isDir = async (p: string): Promise<boolean> => { try { return (await lstat(p)).isDirectory(); } catch { return false; } };
 
+/**
+ * The folders a plugin's manifest adds under `skills` (a string or an array of strings, relative to the plugin root;
+ * "." is the root itself). Absolute paths, `..`, backslashes and anything reached through a symlink are dropped.
+ */
+async function manifestSkillDirs(root: string): Promise<string[]> {
+  const file = join(root, '.claude-plugin', 'plugin.json');
+  let skills: unknown;
+  try {
+    const st = await lstat(file);
+    if (!st.isFile() || st.size > MAX_MANIFEST_BYTES) return [];
+    skills = (JSON.parse(await readFile(file, 'utf8')) as { skills?: unknown } | null)?.skills;
+  } catch { return []; }
+  const list = typeof skills === 'string' ? [skills] : Array.isArray(skills) ? skills : [];
+  const out: string[] = [];
+  for (const raw of list) {
+    if (typeof raw !== 'string' || raw === '' || raw.includes('\0') || raw.includes('\\') || isAbsolute(raw)) continue;
+    const parts = raw.split('/').filter((x) => x !== '' && x !== '.');
+    if (parts.includes('..')) continue;
+    let cur = root;
+    let ok = true;
+    for (const part of parts) {
+      cur = join(cur, part);
+      if (!(await isDir(cur))) { ok = false; break; } // lstat: a symlink is not a directory here
+    }
+    if (ok && parts.length === 0 && !(await isFile(join(root, 'SKILL.md')))) continue; // ".": only a plugin that is itself a skill
+    if (ok) out.push(cur);
+  }
+  return out;
+}
+
+interface Found { dir: string; plugin?: string /* plugin root, for manifest entries */ }
+
 /** Directories named `skills` below `abs` (`depth` is that of abs's children, counted from the plugins root), without following symlinks. */
-async function findSkillsDirs(abs: string, depth: number, out: string[]): Promise<void> {
+async function findSkillsDirs(abs: string, depth: number, out: Found[]): Promise<void> {
   if (depth > MAX_DEPTH) return;
   let entries;
   try { entries = await readdir(abs, { withFileTypes: true }); } catch { return; }
   entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  if (entries.some((e) => e.isDirectory() && e.name === '.claude-plugin')) {
+    for (const dir of await manifestSkillDirs(abs)) out.push({ dir, plugin: abs });
+  }
   for (const e of entries) {
-    if (!e.isDirectory() || SKIP.has(e.name)) continue; // a Dirent for a symlink is not a directory
+    if (!e.isDirectory() || SKIP.has(e.name) || e.name === '.claude-plugin') continue; // a Dirent for a symlink is not a directory
     const p = join(abs, e.name);
-    if (e.name === 'skills') out.push(p); // a skills root is not searched further
+    if (e.name === 'skills') out.push({ dir: p }); // a skills root is not searched further
     else await findSkillsDirs(p, depth + 1, out);
   }
 }
 
 function pluginLabel(rel: string[]): string {
-  // cache/<marketplace>/<plugin>/<version>/skills
-  if (rel[0] === 'cache' && rel.length >= 5) return `plugin ${rel[2]}@${rel[3]}`;
-  return `plugin ${rel.slice(0, -1).join('/')}`;
+  // cache/<marketplace>/<plugin>/<version>/...
+  if (rel[0] === 'cache' && rel.length >= 4) return `plugin ${rel[2]}@${rel[3]}`;
+  return `plugin ${rel.join('/')}`;
 }
 
 /** Existing folders only. */
@@ -57,11 +95,13 @@ export async function defaultScanTargets(ctx: Ctx, projectDir: string): Promise<
   };
   await add('project', join(projectDir, PROJECT_SKILLS_DIR));
   for (const t of TOOL_IDS) await add(`${t} user`, join(ctx.home, TOOL_TARGETS[t].userSkillsDir));
-  const root = ctx.env.CLAUDE_CODE_PLUGIN_CACHE_DIR || join(ctx.home, '.claude', 'plugins');
+  const override = ctx.env.CLAUDE_CODE_PLUGIN_CACHE_DIR;
+  const root = override ? resolve(ctx.cwd, expandHome(override, ctx.home)) : join(ctx.home, '.claude', 'plugins');
   for (const tree of PLUGIN_TREES) {
-    const found: string[] = [];
+    const found: Found[] = [];
     await findSkillsDirs(join(root, tree), 2, found); // `tree` itself is depth 1 below the root
-    for (const dir of found) await add(pluginLabel([tree, ...dir.slice(join(root, tree).length + 1).split(/[\\/]/)]), dir);
+    const rel = (p: string) => [tree, ...p.slice(join(root, tree).length + 1).split(/[\\/]/).filter(Boolean)];
+    for (const f of found) await add(pluginLabel(rel(f.plugin ?? f.dir)), f.dir);
   }
   return out;
 }

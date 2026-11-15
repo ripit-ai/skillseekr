@@ -97,6 +97,12 @@ describe('mcp server', () => {
     expect(missing).toMatchObject({ isError: true, data: { error: 'not-found' } });
   });
 
+  it('get_skill shows quality warnings in security.warnings', async () => {
+    const s = await setup(fixture());
+    const got = await s.call('get_skill', { skill: 'alpha' });
+    expect(got.data.security.warnings.map((f: { rule: string }) => f.rule)).toContain('quality/description-short');
+  });
+
   it('get_skill on a missing skill returns isError with suggestions', async () => {
     const s = await setup(fixture());
     const amb = await s.call('get_skill', { skill: 'nosuch' });

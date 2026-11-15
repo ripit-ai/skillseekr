@@ -23,7 +23,7 @@ async function validateSkillDir(dir: string): Promise<Problem[]> {
     return [err('skill/no-skill-md', `${dir} has no SKILL.md, so it is not a skill folder`, file)];
   }
   const fm = parseFrontmatter(text);
-  if (!fm.ok) return [err('skill/missing-frontmatter', `${file}: no YAML frontmatter (a leading "---" block with name and description)`, file)];
+  if (!fm.ok) return [err('skill/missing-frontmatter', `${file}: no YAML frontmatter (a leading "---" block with name and description)`, file), ...await scanProblems(dir, '')];
   const problems: Problem[] = [];
   if (fm.lenient) problems.push({ level: 'warning', code: 'frontmatter/lenient', message: `${file}: frontmatter is not strict YAML`, file });
   const name = typeof fm.data.name === 'string' ? fm.data.name.trim() : '';

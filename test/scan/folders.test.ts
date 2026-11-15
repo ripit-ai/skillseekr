@@ -33,6 +33,55 @@ describe('defaultScanTargets', () => {
     expect(await defaultScanTargets(await ctxFor(home), join(home, 'proj'))).toEqual([]);
   });
 
+  it('the depth boundary is 6 and synced plugins are found', async () => {
+    const home = await tmpDir();
+    const base = join(home, '.claude', 'plugins');
+    await mkdir(join(base, 'cache', 'a', 'b', 'c', 'd', 'skills'), { recursive: true }); // depth 6
+    await mkdir(join(base, 'cache', 'a', 'b', 'c', 'd', 'e', 'skills'), { recursive: true }); // depth 7
+    await mkdir(join(base, 'synced', 'sp', 'skills'), { recursive: true });
+    const t = await defaultScanTargets(await ctxFor(home), join(home, 'proj'));
+    expect(t.map((x) => x.dir)).toEqual([join(base, 'cache', 'a', 'b', 'c', 'd', 'skills'), join(base, 'synced', 'sp', 'skills')]);
+  });
+
+  it('plugin manifest skills (string or array) are targets; absolute, .. and symlinked paths are dropped; big manifests ignored', async () => {
+    const home = await tmpDir();
+    const plugins = join(home, '.claude', 'plugins', 'cache', 'm');
+    const mk = async (name: string, manifest: string) => {
+      const root = join(plugins, name, '1.0.0');
+      await mkdir(join(root, '.claude-plugin'), { recursive: true });
+      await writeFile(join(root, '.claude-plugin', 'plugin.json'), manifest);
+      return root;
+    };
+    const one = await mk('one', JSON.stringify({ skills: './extra-skills/' }));
+    await mkdir(join(one, 'extra-skills'));
+    const two = await mk('two', JSON.stringify({ skills: ['./a', 'b/c', '../escape', '/abs', './link', './missing'] }));
+    await mkdir(join(two, 'a'));
+    await mkdir(join(two, 'b', 'c'), { recursive: true });
+    await mkdir(join(home, 'secret'));
+    await symlink(join(home, 'secret'), join(two, 'link'));
+    await mkdir(join(plugins, 'escape'), { recursive: true });
+    const big = await mk('big', JSON.stringify({ skills: './x', pad: 'y'.repeat(70 * 1024) }));
+    await mkdir(join(big, 'x'));
+    const dot = await mk('dot', JSON.stringify({ skills: '.' }));
+    await writeFile(join(dot, 'SKILL.md'), '---\nname: dot\n---\n');
+    const t = await defaultScanTargets(await ctxFor(home), join(home, 'proj'));
+    expect(t.map((x) => [x.label, x.dir])).toEqual([
+      ['plugin dot@1.0.0', dot],
+      ['plugin one@1.0.0', join(one, 'extra-skills')],
+      ['plugin two@1.0.0', join(two, 'a')],
+      ['plugin two@1.0.0', join(two, 'b', 'c')],
+    ]);
+  });
+
+  it('a relative or ~ CLAUDE_CODE_PLUGIN_CACHE_DIR is resolved', async () => {
+    const home = await tmpDir();
+    await mkdir(join(home, 'pl', 'cache', 'm', 'r', '3', 'skills'), { recursive: true });
+    for (const v of ['~/pl', 'pl']) {
+      const t = await defaultScanTargets(await ctxFor(home, { CLAUDE_CODE_PLUGIN_CACHE_DIR: v }), home);
+      expect(t.map((x) => x.label)).toEqual(['plugin r@3']);
+    }
+  });
+
   it('CLAUDE_CODE_PLUGIN_CACHE_DIR moves the plugins root', async () => {
     const home = await tmpDir();
     const root = join(home, 'elsewhere');
