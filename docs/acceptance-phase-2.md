@@ -5,7 +5,7 @@ For whoever signs off Phase 2 (runtime security and integrity). Each criterion f
 Run the automated part first:
 
 ```sh
-npm run lint && npm test && npm run build
+pnpm run lint && pnpm test && pnpm run build
 ```
 
 Expected: no type errors, every test file passes, no warnings in the output. `test/e2e/stdio.test.ts` runs the built `dist/cli/main.js` (the vitest global setup builds it first).
