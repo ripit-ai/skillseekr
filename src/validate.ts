@@ -1,6 +1,9 @@
 import { readFile, stat } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { parseFrontmatter } from './catalog/frontmatter.js';
+import { contentHash } from './catalog/hash.js';
+import { qualityFindings, readSkillMd } from './scan/quality.js';
+import { scanSkillDir } from './scan/scan.js';
 import { emptyPolicyBlock } from './policy/types.js';
 import { parseRegistriesFile } from './config/load.js';
 import type { Ctx } from './context.js';
@@ -22,6 +25,7 @@ async function validateSkillDir(dir: string): Promise<Problem[]> {
   const fm = parseFrontmatter(text);
   if (!fm.ok) return [err('skill/missing-frontmatter', `${file}: no YAML frontmatter (a leading "---" block with name and description)`, file)];
   const problems: Problem[] = [];
+  if (fm.lenient) problems.push({ level: 'warning', code: 'frontmatter/lenient', message: `${file}: frontmatter is not strict YAML`, file });
   const name = typeof fm.data.name === 'string' ? fm.data.name.trim() : '';
   const folder = basename(dir);
   if (name === '') problems.push(err('skill/missing-name', `${file}: frontmatter has no "name"`, file));
@@ -29,7 +33,26 @@ async function validateSkillDir(dir: string): Promise<Problem[]> {
   if (typeof fm.data.description !== 'string' || fm.data.description.trim() === '') {
     problems.push(err('skill/missing-description', `${file}: frontmatter has no "description"`, file));
   }
+  problems.push(...await scanProblems(dir, typeof fm.data.description === 'string' ? fm.data.description : ''));
   return problems;
+}
+
+/** Scanner findings (`scan/<rule>`, critical = error) and quality findings (`quality/...`, warnings) for a skill folder. */
+async function scanProblems(dir: string, description: string): Promise<Problem[]> {
+  try {
+    const { files } = await contentHash(dir);
+    const out: Problem[] = [];
+    for (const f of (await scanSkillDir(dir, files)).findings) {
+      out.push({ level: f.severity === 'critical' ? 'error' : 'warning', code: `scan/${f.rule}`, file: join(dir, f.file),
+        message: `${f.file}:${f.line} ${f.message}${f.downgraded ? ` (${f.downgraded})` : ''}` });
+    }
+    for (const f of await qualityFindings({ description, dir, files }, await readSkillMd(dir))) {
+      out.push({ level: 'warning', code: f.rule, file: join(dir, f.file), message: `${f.file}:${f.line} ${f.message}` });
+    }
+    return out;
+  } catch (e) {
+    return [err('scan/failed', `scanning ${dir} failed: ${e instanceof Error ? e.message : String(e)}`)];
+  }
 }
 
 /**

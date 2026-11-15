@@ -2,7 +2,10 @@ import { lstat, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Ctx } from './context.js';
 import type { Engine } from './engine.js';
+import { blockedReason } from './catalog/catalog.js';
 import { listInstalled } from './install/installer.js';
+import { removeHint } from './install/security.js';
+import { nearDuplicates } from './scan/quality.js';
 import { TOOL_TARGETS, presentTools } from './install/targets.js';
 import { allRegistrars, starterDir, STARTER_NAME } from './setup/setup.js';
 import type { Auth, Problem } from './types.js';
@@ -14,6 +17,8 @@ const LOOP_CODES = new Set(['resolve/include-loop', 'resolve/too-deep']);
 const oneLine = (s: string) => s.replace(/\s*\n\s*/g, ' ');
 const viaText = (via: string[]) => via.join(' → ');
 const isGithubType = (t: string) => t === 'github' || t === 'github-registry';
+/** Comma-joined, at most 10 entries, then "… and N more". */
+const list = (items: string[]) => (items.length <= 10 ? items : [...items.slice(0, 10), `… and ${items.length - 10} more`]).join(', ');
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /**
@@ -118,6 +123,20 @@ export async function doctor(engine: Engine, ctx: Ctx, opts: { vscodeWorkspace?:
       add(`skills-dir:${tool}`, 'ok', `${dir}: ${mine.length} skillseekr-managed ${mine.length === 1 ? 'skill' : 'skills'}`);
     }
   }
+
+  // Security, policy and quality.
+  const blocked = catalog.blocked();
+  if (blocked.length > 0) add('security:blocked', 'warn', `${blocked.length} blocked ${blocked.length === 1 ? 'skill' : 'skills'}: ${list(blocked.map((b) => `${b.id} (${blockedReason(b.security)})`))}`);
+  for (const i of await listInstalled(ctx, { scope: 'user', catalog })) {
+    if (i.security?.status === 'blocked') add(`security:installed:${i.name}`, 'fail', `installed copy at ${i.dir} is blocked: ${blockedReason(i.security)}; ${removeHint(i)}`);
+  }
+  const allows = catalog.policy.sources.filter((s) => s.source.kind === 'local').flatMap((s) => Object.entries(s.allow));
+  if (allows.length > 0) add('policy:allow', 'warn', `${allows.length} local allow ${allows.length === 1 ? 'entry' : 'entries'}: ${list(allows.map(([id, a]) => `${id} (added ${a.added}; rules: ${a.rules.join(', ')})`))}`);
+  const ignored = catalog.problems.filter((p) => p.code.startsWith('policy/ignored-'));
+  if (ignored.length > 0) add('policy:ignored', 'warn', list([...new Set(ignored.map((p) => p.message))]));
+  const dups = nearDuplicates(catalog.skills.filter((k) => k.security.status !== 'blocked'));
+  if (dups.length > 0) add('quality:near-duplicates', 'warn', `skills with near-identical descriptions: ${list(dups.map((d) => `${d.a} ~ ${d.b} (${d.similarity.toFixed(2)})`))}`);
+  for (const t of catalog.policy.trust) add(`trust:${t.owner}`, 'ok', `${t.public_keys.length} trusted ${t.public_keys.length === 1 ? 'key' : 'keys'} for ${t.owner}`);
 
   return { checks };
 }

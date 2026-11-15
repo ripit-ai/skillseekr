@@ -15,6 +15,7 @@ import { registerMcp } from './commands/mcp.js';
 import { registerOutdated } from './commands/outdated.js';
 import { registerRegistries } from './commands/registries.js';
 import { registerRemove } from './commands/remove.js';
+import { registerScan } from './commands/scan.js';
 import { registerSearch } from './commands/search.js';
 import { registerShow } from './commands/show.js';
 import { registerSign } from './commands/sign.js';
@@ -30,7 +31,7 @@ export type { Io } from './output.js';
 /** Command registrars, in help order. */
 export const commands: Array<(program: Command, cli: Cli) => void> = [
   registerSetup, registerSearch, registerShow, registerInstall, registerRemove, registerList, registerOutdated,
-  registerUpdate, registerBlock, registerAllow, registerRegistries, registerSync, registerDoctor, registerValidate, registerKeys, registerSign, registerMcp,
+  registerUpdate, registerBlock, registerAllow, registerRegistries, registerSync, registerDoctor, registerScan, registerValidate, registerKeys, registerSign, registerMcp,
 ];
 
 function version(): string {
