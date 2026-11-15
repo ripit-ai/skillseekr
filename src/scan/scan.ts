@@ -6,7 +6,7 @@ import { constants } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { parseFrontmatter } from '../catalog/frontmatter.js';
 import { MAX_FILE_BYTES, MAX_SCAN_BYTES, SNIFF_BYTES } from '../catalog/limits.js';
-import { RULES, TOOL_KEYS, ruleMatch, ruleTest, toolGrants, type Rule } from './rules.js';
+import { RULES, TOOL_KEYS, ruleMatch, ruleMatches, ruleTest, toolGrants, type Rule } from './rules.js';
 import { downgradeReason, quotedSpans, readsPatterns, type FileKind, type Span } from './context.js';
 
 export interface Finding { rule: string; severity: 'critical' | 'warning'; file: string; line: number; message: string; downgraded?: string /* reason */ }
@@ -21,6 +21,27 @@ const SHELLISH = /\.(?:sh|bash|zsh)$|(?:^|\/)(?:[Mm]akefile|GNUmakefile|\.envrc|
 export const SKILL_SCAN_BUDGET = 12 * 1024 * 1024;
 
 export const UNSCANNABLE_RULE = 'integrity/unscannable-file';
+
+/**
+ * Text rules that can be downgraded look at every match on a line (Task 2 review): a quoted or defensive first match
+ * must not hide a real second one. At most this many per line are judged; a line with more fails closed.
+ */
+const MAX_LINE_MATCHES = 16;
+const everyMatch = (rule: Rule) => rule.target !== 'script' && rule.severity === 'critical' && !rule.neverDowngrade;
+type Span2 = { index: number; length: number };
+function* filter(it: Iterable<Span2>, keep: (m: Span2) => boolean): Generator<Span2> { for (const m of it) if (keep(m)) yield m; }
+/** The first match judged critical; else the first (downgraded) one; past MAX_LINE_MATCHES, the extra match undowngraded. */
+function firstReal(matches: Iterable<Span2>, at: (m: Span2) => Finding): Finding | undefined {
+  let first: Finding | undefined;
+  let n = 0;
+  for (const m of matches) {
+    const f = at(m);
+    if (++n > MAX_LINE_MATCHES) return { rule: f.rule, severity: 'critical', file: f.file, line: f.line, message: f.message };
+    if (f.downgraded === undefined) return f;
+    first ??= f;
+  }
+  return first;
+}
 const unscannable = (file: string, message: string): Finding => ({ rule: UNSCANNABLE_RULE, severity: 'critical', file, line: 1, message });
 const TOO_LARGE = 'file is over 10 MB and was not scanned';
 const OVER_BUDGET = 'exceeds per-skill scan budget';
@@ -255,7 +276,12 @@ class FileScan {
       // rule can only get another downgraded finding from it, which it doesn't need once it holds `cap`.
       if ((weak || (downgradable && downgraded.length >= cap)) && this.wholeQuoted(i)) continue;
       if (weak && this.strong(i)) continue;
-      const finding = this.matchLine(rule, i) ?? this.matchPair(rule, i);
+      // A downgraded match on the line must not hide a real one that crosses into the next line.
+      let finding = this.matchLine(rule, i);
+      if (!finding || finding.downgraded !== undefined) {
+        const pair = this.matchPair(rule, i);
+        if (pair && (!finding || pair.downgraded === undefined)) finding = pair;
+      }
       if (!finding) continue;
       if (rule.severity === 'critical') this.strongLines.add(i);
       if (finding.downgraded === undefined) kept.push(finding);
@@ -321,8 +347,12 @@ class FileScan {
 
   private matchLine(rule: Rule, i: number): Finding | undefined {
     const text = this.texts[i]!;
-    const m = ruleMatch(rule, text, this.file);
-    return m ? this.finding(rule, text, this.line(i), m, this.spansOf(i), this.inFrontmatter(this.line(i))) : undefined;
+    const at = (m: { index: number; length: number }) => this.finding(rule, text, this.line(i), m, this.spansOf(i), this.inFrontmatter(this.line(i)));
+    if (!everyMatch(rule)) {
+      const m = ruleMatch(rule, text, this.file);
+      return m ? at(m) : undefined;
+    }
+    return firstReal(ruleMatches(rule, text, MAX_LINE_MATCHES + 1), at);
   }
 
   /**
@@ -337,10 +367,14 @@ class FileScan {
     const aBlock = this.spansOf(i).length > 0;
     if (aBlock !== this.spansOf(i + 1).length > 0) return undefined;
     const text = `${a} ${b}`;
-    const m = ruleMatch(rule, text, this.file);
-    if (!m || m.index >= a.length || m.index + m.length <= a.length + 1) return undefined;
     const fm = this.inFrontmatter(this.line(i)) && this.inFrontmatter(this.line(i + 1));
-    return this.finding(rule, text, this.line(i), m, aBlock ? [[0, Infinity]] : [], fm);
+    const at = (m: { index: number; length: number }) => this.finding(rule, text, this.line(i), m, aBlock ? [[0, Infinity]] : [], fm);
+    const crosses = (m: { index: number; length: number }) => m.index < a.length && m.index + m.length > a.length + 1;
+    if (!everyMatch(rule)) {
+      const m = ruleMatch(rule, text, this.file);
+      return m && crosses(m) ? at(m) : undefined;
+    }
+    return firstReal(filter(ruleMatches(rule, text, MAX_LINE_MATCHES + 1), crosses), at);
   }
 
   /** Frontmatter rules test each granted tool and report the line of its key. */

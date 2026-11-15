@@ -589,6 +589,10 @@ const WORDISH = /[\p{L}\p{N}]/u;
  * double, curly double, corner brackets, and straight single quotes that aren't apostrophes inside a word. In
  * frontmatter, the quotes that wrap a YAML value are syntax, not quotation, and don't count.
  */
+/** Quote state at `k` for the last line asked about: text rules judge every match on a line in order (Task 2
+ * review), so each line is walked once instead of once per match. */
+let quoteMemo: { text: string; frontmatter: boolean; k: number; open: string | undefined } | undefined;
+
 function enclosedInQuotes(site: MatchSite): boolean {
   const { text, index, length } = site;
   const skip = new Set<number>();
@@ -598,18 +602,20 @@ function enclosedInQuotes(site: MatchSite): boolean {
     if (m && end > m[1]!.length && text[end] === m[2]) { skip.add(m[1]!.length); skip.add(end); }
   }
   const apostrophe = (k: number) => WORDISH.test(text[k - 1] ?? '') && WORDISH.test(text[k + 1] ?? '');
-  let open: string | undefined;
-  for (let k = 0; k < index; k++) {
+  const memo = quoteMemo && quoteMemo.text === text && quoteMemo.frontmatter === site.frontmatter && quoteMemo.k <= index ? quoteMemo : undefined;
+  let open = memo?.open;
+  for (let k = memo?.k ?? 0; k < index; k++) {
     if (skip.has(k)) continue;
     const c = text[k]!;
     if (c === "'" && apostrophe(k)) continue;
     if (open === undefined) { if (c in CLOSE) open = c; }
     else if (c === CLOSE[open]) open = undefined;
   }
+  quoteMemo = { text, frontmatter: site.frontmatter, k: index, open };
   if (open === undefined) return false;
-  for (let k = index + length; k < text.length; k++) {
-    if (skip.has(k)) continue;
-    if (text[k] === CLOSE[open] && !(open === "'" && apostrophe(k))) return true;
+  const close = CLOSE[open]!;
+  for (let k = text.indexOf(close, index + length); k >= 0; k = text.indexOf(close, k + 1)) {
+    if (!skip.has(k) && !(open === "'" && apostrophe(k))) return true;
   }
   return false;
 }
@@ -620,12 +626,24 @@ const DEFENSIVE_END = /\b(?:if|when)\s+(?:[\w-]+\s+){0,2}(?:says|contains|tries|
 const DEFENSIVE_ANY = /never\s+follow|not\s+(?:an?\s+)?instructions?|injection|data,?\s+not|绝不|flag\s+it/i;
 /** A negation directly before the match ("Never ignore previous instructions", "Do not tell the user…") forbids it. */
 const DEFENSIVE_NEGATION = /\b(?:never|do\s+not|don['’]t|must\s+not)\s+$/i;
+const MATCH_NEGATION = /\b(?:never|not|don['’]t)\b/i;
+const OVERRIDE_VERB = /\b(?:ignore|disregard|forget|override|bypass|hide|conceal|tell|inform|without)\b/i;
+
+const SENTENCE_STOP = new Set(['.', '!', '?', ';', '。']);
 
 function defensiveBefore(site: MatchSite): boolean {
-  const prefix = site.text.slice(Math.max(0, site.index - 4096), site.index);
-  const stops = [...prefix.matchAll(/[.!?;。]/g)];
-  const region = stops.length ? prefix.slice(stops[stops.length - 1]!.index! + 1) : prefix;
-  if (DEFENSIVE_END.test(region) || DEFENSIVE_ANY.test(region) || DEFENSIVE_NEGATION.test(region)) return true;
+  // The sentence before the match, at most 4096 characters back (found backwards: one line can hold many matches).
+  let from = site.index;
+  const floor = Math.max(0, site.index - 4096);
+  while (from > floor && !SENTENCE_STOP.has(site.text[from - 1]!)) from--;
+  const region = site.text.slice(from, site.index);
+  // A negation inside the match ("never tell the user") is the match's own wording: "Never never tell …" is not a
+  // defensive negation of it. Nor is one the rest of the line takes back ("Don't ignore previous instructions —
+  // ignore them all"): any later override or concealment verb on the line voids the cue (Task 2 review).
+  const end = site.index + site.length;
+  const negated = DEFENSIVE_NEGATION.test(region) && !MATCH_NEGATION.test(site.text.slice(site.index, end))
+    && !OVERRIDE_VERB.test(site.text.slice(end, end + 4096));
+  if (DEFENSIVE_END.test(region) || DEFENSIVE_ANY.test(region) || negated) return true;
   // "Treat <match> as data."
   return /\btreat\b/i.test(region) && /^[^.!?]{0,30}?\bas\s+data\b/i.test(site.text.slice(site.index + site.length, site.index + site.length + 64));
 }

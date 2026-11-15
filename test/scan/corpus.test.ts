@@ -81,6 +81,17 @@ describe('false-positive corpus', () => {
       'in a comment, docstring or pattern', 'in a defensive sentence', 'in quotation marks',
       'inside an example block', 'only prints the command', 'target is localhost',
     ]);
+    // Script-rule downgrades the brief's categories rely on, asserted per file (the per-file cap can hide them).
+    const COMMENT = 'in a comment, docstring or pattern';
+    const at = (id: string, file: string) => legit.get(id)!.findings.filter((f) => f.file === file).map((f) => [f.rule, f.line, f.severity, f.downgraded]);
+    const lint = await readFile(join(root, 'test/fixtures/legit/install-lint/scripts/test_patterns.py'), 'utf8');
+    const rxLines = lint.split('\n').flatMap((l, i) => (/re\.compile\(r"curl/.test(l) ? [i + 1] : []));
+    expect(rxLines).toHaveLength(1);
+    expect(at('install-lint', 'scripts/test_patterns.py')).toContainEqual(['download-and-run/curl-pipe-shell', rxLines[0], 'warning', COMMENT]);
+    const hygiene = at('secret-hygiene-review', 'scripts/find_offenders.py');
+    expect(hygiene).toContainEqual(['credential-read/home-credentials', 6, 'warning', COMMENT]); // docstring
+    expect(hygiene).toContainEqual(['download-and-run/curl-pipe-shell', 8, 'warning', COMMENT]); // docstring
+    expect(hygiene).toContainEqual(['download-and-run/curl-pipe-shell', 15, 'warning', COMMENT]); // # comment
     const standup = await readFile(join(root, 'test/fixtures/legit/team-standup/SKILL.md'), 'utf8');
     expect(standup).toContain('\u{1F469}\u{200D}\u{1F4BB}');
     expect(legit.get('team-standup')!.findings).toEqual([]);

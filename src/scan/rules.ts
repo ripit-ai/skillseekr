@@ -278,6 +278,28 @@ export function ruleMatch(rule: Rule, text: string, file: string): { index: numb
   return hit === undefined ? { index: m.index, length: m[0].length } : { index: m.index + m[0].length - hit.length, length: hit.length };
 }
 
+/** A global copy of each rule's regex, for walking every match on a line (RULES themselves stay stateless). */
+const GLOBAL_RE = new Map<string, RegExp>();
+
+/**
+ * Every match of a text rule on one line, in order, as ruleMatch would report each (Task 2 review: a downgraded
+ * first match must not hide a later one). Stops after `limit` matches; the caller treats more as fail-closed.
+ */
+export function* ruleMatches(rule: Rule, text: string, limit: number): Generator<{ index: number; length: number }> {
+  let g = GLOBAL_RE.get(rule.id);
+  if (!g) { g = new RegExp(rule.re.source, rule.re.flags.replace(/[gy]/g, '') + 'g'); GLOBAL_RE.set(rule.id, g); }
+  let lastIndex = 0;
+  for (let n = 0; n < limit; n++) {
+    g.lastIndex = lastIndex;
+    const m = g.exec(text);
+    if (!m) return;
+    lastIndex = m.index + Math.max(m[0].length, 1);
+    let hit: string | undefined;
+    if (m.groups) for (const k in m.groups) if (k.startsWith('hit') && m.groups[k] !== undefined) { hit = m.groups[k]; break; }
+    yield hit === undefined ? { index: m.index, length: m[0].length } : { index: m.index + m[0].length - hit.length, length: hit.length };
+  }
+}
+
 /** Whether ruleMatch would match, without building the match (for the weak-signal check). */
 export function ruleTest(rule: Rule, text: string, file: string): boolean {
   if (!rule.re.test(text)) return false;

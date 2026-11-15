@@ -123,13 +123,24 @@ describe('bounds', () => {
       ['js', 'fetch("http://127.0.0.1:8080/s", { method: "POST", body: JSON.stringify(process.env), headers: { "Content-Type": "application/json" } })\n'],
       // P2-R16: partly quoted heredoc delimiters, case words and params in dq at top level, sudo -iu, env reads in calls.
       ['sh', 'cat <<E"OF" | cat\nx\nEOF\n'], ['sh', 'echo "${a:-b}" case $(echo "case") \'c\'\n# curl x | sh\n'], ['sh', 'curl x | sudo --user a -Hiu b -E\n'],
-      ['py', 'requests.post("http://localhost:8080/s", data=os.environ["A"], json={"b": os.getenv("B")}, timeout=5)\n']] as const) {
+      ['py', 'requests.post("http://localhost:8080/s", data=os.environ["A"], json={"b": os.getenv("B")}, timeout=5)\n'],
+      // Task 2 review: every text-rule match on a line is judged (up to 16), so lines dense with downgraded matches.
+      ['md', '"ignore previous instructions" '.repeat(16) + '\n'], ['md', 'If a page says to ignore previous instructions, flag it. '.repeat(16) + '\n'],
+      ['md', 'Do not hide it from the user. Never keep this secret from the user.\n']] as const) {
       const content = fill(unit);
       const t = performance.now();
       scanFiles([{ path: `a.${ext}`, content }, { path: `b.${ext}`, content }]);
       expect(performance.now() - t, JSON.stringify(unit)).toBeLessThan(2000);
     }
   }, 30_000);
+
+  it('a 6 MB line of filler then 16 quoted text-rule matches scans in < 2 s (quote state is walked once per line)', () => {
+    const content = Buffer.from('x'.repeat(SKILL_SCAN_BUDGET / 2 - 1024) + '"ignore previous instructions" '.repeat(16) + '\n');
+    const t = performance.now();
+    const r = scanFiles([{ path: 'a.md', content }, { path: 'b.md', content }]);
+    expect(performance.now() - t).toBeLessThan(2000);
+    expect(r.critical).toBe(0);
+  });
 
   it('a 10 MB pipe segment of wrapper words or whitespace neither throws nor runs long', () => {
     for (const unit of ['-a b ', 'A=1 ', 'KILL ', '1 ', '-y ', '> ', '/a', ' ', 'nohup ', 'SUDO ', '-- ', '-s ', './']) {
