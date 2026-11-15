@@ -38,7 +38,7 @@ describe('rule table', () => {
   });
 
   it('has the rules version and no stateful (global or sticky) regexes', () => {
-    expect(RULES_VERSION).toBe('1');
+    expect(RULES_VERSION).toBe('2');
     for (const r of RULES) expect(r.re.flags).not.toMatch(/[gy]/);
   });
 

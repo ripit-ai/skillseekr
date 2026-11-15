@@ -101,6 +101,8 @@ function scriptLang(lines: string[], file: string): Lang {
   if (PY_FILE.test(file)) return 'py';
   if (/\.(?:rb|pl)$/i.test(file)) return 'rbpl';
   if (/\.ps1$/i.test(file)) return 'ps1';
+  // A shell extension (also the one the scanner gives a file the skill runs with `bash`/`sh`/`source`, P2-R19).
+  if (/\.(?:sh|bash|zsh)$/i.test(file)) return 'shell';
   const bang = lines[0]?.startsWith('#!') ? lines[0] : '';
   if (/python/.test(bang)) return 'py';
   if (/\b(?:node|deno|bun)\b/.test(bang)) return 'js';

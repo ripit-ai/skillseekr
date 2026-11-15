@@ -369,7 +369,8 @@ describe('engine security', () => {
     try {
       await engine.catalog({ force: true });
       expect(spy.count()).toBe(4);
-      expect((await readdir(join(s.dir, 'cache', 'scan'))).sort()).toEqual(['1', 'next']);
+      const real = (await vi.importActual<typeof import('../src/scan/rules.js')>('../src/scan/rules.js')).RULES_VERSION;
+      expect((await readdir(join(s.dir, 'cache', 'scan'))).sort()).toEqual([real, 'next'].sort());
     } finally {
       rules.version = undefined;
     }

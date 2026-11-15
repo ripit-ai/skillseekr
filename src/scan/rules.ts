@@ -5,7 +5,7 @@
 // home-directory forms and secret variables; case-insensitive shell commands; and linear-time regex shapes.
 
 /** Bump whenever any rule or downgrade decision changes: cached scan results are keyed by it. */
-export const RULES_VERSION = '1';
+export const RULES_VERSION = '2';
 
 /**
  * Where a rule applies. `text`: Markdown, frontmatter and every other non-script text file. `script`: see
