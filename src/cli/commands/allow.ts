@@ -5,7 +5,7 @@ import { configPath } from '../../paths.js';
 import type { AllowEntry } from '../../policy/types.js';
 import { CliError, findingLine, isJson, loadCatalog, lookupOrThrow, printJson, type Cli } from '../output.js';
 import { today } from './block.js';
-import { readConfigText, writeAtomic } from './registries.js';
+import { guardEdit, readEditable, writeEdited } from './registries.js';
 
 interface AllowOpts { reason?: string; yes?: boolean; list?: boolean; prune?: boolean }
 
@@ -25,6 +25,7 @@ export function registerAllow(program: Command, cli: Cli): void {
     .option('--list', 'list all allow entries')
     .option('--prune', 'remove local entries whose content hash matches no current skill')
     .action(async (id: string | undefined, opts: AllowOpts, cmd: Command) => {
+      if ((opts.list || opts.prune) && id !== undefined) throw new CliError('--list and --prune take no skill id');
       if (opts.list && opts.prune) throw new CliError('--list and --prune cannot be combined');
       if (opts.list) {
         const rows = listEntries(await loadCatalog(cli));
@@ -34,16 +35,20 @@ export function registerAllow(program: Command, cli: Cli): void {
       }
       if (opts.prune) {
         const catalog = await loadCatalog(cli);
+        if (catalog.stale || catalog.problems.some((p) => p.level === 'error')) throw new CliError('catalog incomplete; prune would drop live entries');
         const file = configPath(cli.ctx);
-        let text = await readConfigText(file, '{ "registries": {} }\n');
-        const local = (parse(text, [], { allowTrailingComma: true }) as { allow?: Record<string, AllowEntry> } | undefined)?.allow ?? {};
+        let text = await readEditable(file, '{ "registries": {} }\n');
+        const parsed = parse(text, [], { allowTrailingComma: true }) as { allow?: unknown } | undefined;
+        const local = typeof parsed?.allow === 'object' && parsed.allow !== null && !Array.isArray(parsed.allow) ? parsed.allow as Record<string, unknown> : {};
         const removed: Array<{ id: string } & AllowEntry> = [];
-        for (const [aid, e] of Object.entries(local)) {
+        for (const [aid, raw] of Object.entries(local)) {
+          if (typeof raw !== 'object' || raw === null || typeof (raw as AllowEntry).content_hash !== 'string') continue;
+          const e = raw as AllowEntry;
           if (catalog.byId(aid)?.contentHash === e.content_hash) continue;
-          text = removeAllow(text, aid);
+          text = guardEdit(file, () => removeAllow(text, aid));
           removed.push({ id: aid, ...e });
         }
-        if (removed.length > 0) await writeAtomic(file, text);
+        if (removed.length > 0) await writeEdited(file, text);
         if (isJson(cmd)) return printJson(cli.io, removed);
         return cli.io.out(removed.length === 0 ? 'nothing to prune\n' : removed.map((r) => `removed allow entry for ${r.id}\n`).join(''));
       }
@@ -66,8 +71,8 @@ export function registerAllow(program: Command, cli: Cli): void {
       }
       const entry: AllowEntry = { content_hash: skill.contentHash, rules, reason: opts.reason, added: today(cli) };
       const file = configPath(cli.ctx);
-      const text = await readConfigText(file, '{ "registries": {} }\n');
-      await writeAtomic(file, setAllow(text, skill.id, entry));
+      const text = await readEditable(file, '{ "registries": {} }\n');
+      await writeEdited(file, guardEdit(file, () => setAllow(text, skill.id, entry)));
       if (isJson(cmd)) return printJson(cli.io, { id: skill.id, ...entry });
       cli.io.out(`allowed ${skill.id} in ${file}\n`);
     });

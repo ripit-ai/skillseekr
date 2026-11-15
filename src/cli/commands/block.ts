@@ -4,7 +4,7 @@ import { addBlock, removeBlock } from '../../config/edit.js';
 import { configPath } from '../../paths.js';
 import type { BlockEntry } from '../../policy/types.js';
 import { CliError, isJson, printJson, type Cli } from '../output.js';
-import { readConfigText, writeAtomic } from './registries.js';
+import { guardEdit, readEditable, writeEdited } from './registries.js';
 
 const HASH_RE = /^sha256:[0-9a-f]{64}$/;
 
@@ -21,19 +21,33 @@ function matchOf(id: string | undefined, hash: string | undefined): { id: string
 
 const describe = (m: { id: string } | { content_hash: string }): string => ('id' in m ? m.id : m.content_hash);
 
+/** A pre-block of an id nothing currently has is allowed, but blocks match exact ids: say so, and suggest by name. */
+async function noteUnknownId(cli: Cli, id: string): Promise<void> {
+  const catalog = await cli.engine().catalog();
+  if (catalog.byId(id)) return;
+  const named = catalog.skills.filter((k) => k.name === id).map((k) => k.id);
+  const hint = named.length > 0 ? ` (did you mean ${named.join(', ')}?)` : '';
+  cli.io.err(`note: no skill with id "${id}" is currently known; blocks match exact ids${hint}\n`);
+}
+
 export function registerBlock(program: Command, cli: Cli): void {
   program.command('block [id]').description('deny a skill by id or content hash in the local config (nothing lifts a block but removing it)')
     .option('--hash <sha256:…>', 'block this exact content under any id')
     .requiredOption('--reason <text>', 'why it is blocked')
     .action(async (id: string | undefined, opts: { hash?: string; reason: string }, cmd: Command) => {
       const m = matchOf(id, opts.hash);
+      if ('id' in m && m.id.trim() === '') throw new CliError('the skill id must not be empty');
       if (opts.reason.trim() === '') throw new CliError('--reason must not be empty');
       const entry: BlockEntry = { ...m, reason: opts.reason, added: today(cli) };
       const file = configPath(cli.ctx);
-      const text = await readConfigText(file, '{ "registries": {} }\n');
+      const text = await readEditable(file, '{ "registries": {} }\n');
       let next: string;
-      try { next = addBlock(text, entry); } catch (e) { throw new CliError(`${describe(m)}: ${e instanceof Error ? e.message : String(e)}`); }
-      await writeAtomic(file, next);
+      try { next = addBlock(text, entry); } catch (e) {
+        if (e instanceof Error && e.message === 'already blocked') throw new CliError(`${describe(m)}: already blocked`);
+        throw new CliError(`cannot edit ${file}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      await writeEdited(file, next);
+      if ('id' in m) await noteUnknownId(cli, m.id);
       if (isJson(cmd)) return printJson(cli.io, entry);
       cli.io.out(`blocked ${describe(m)} in ${file}\n`);
     });
@@ -43,21 +57,28 @@ export function registerBlock(program: Command, cli: Cli): void {
     .action(async (id: string | undefined, opts: { hash?: string }, cmd: Command) => {
       const m = matchOf(id, opts.hash);
       const file = configPath(cli.ctx);
-      const text = await readConfigText(file, '{ "registries": {} }\n');
-      let next: string | undefined;
-      try { next = removeBlock(text, m); } catch { /* not in the local config: see the includes */ }
-      if (next === undefined) {
+      const text = await readEditable(file, '{ "registries": {} }\n');
+      const includeOf = async (): Promise<string | undefined> => {
         const catalog = await cli.engine().catalog();
         for (const s of catalog.policy.sources) {
           if (s.source.kind !== 'include') continue;
-          if (s.block.some((e) => ('id' in m ? 'id' in e && e.id === m.id : 'content_hash' in e && e.content_hash === m.content_hash))) {
-            throw new CliError(`${describe(m)} is blocked by ${s.source.name}; lift it in that registries file`);
-          }
+          if (s.block.some((e) => ('id' in m ? 'id' in e && e.id === m.id : 'content_hash' in e && e.content_hash === m.content_hash))) return s.source.name;
         }
+        return undefined;
+      };
+      let next: string | undefined;
+      try { next = removeBlock(text, m); } catch (e) {
+        if (!(e instanceof Error && e.message === 'not blocked')) throw new CliError(`cannot edit ${file}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      if (next === undefined) {
+        const inc = await includeOf();
+        if (inc) throw new CliError(`${describe(m)} is blocked by ${inc}; lift it in that registries file`);
         throw new CliError(`${describe(m)} is not blocked`);
       }
       const entry = readBlockEntry(text, m);
-      await writeAtomic(file, next);
+      await writeEdited(file, next);
+      const still = await includeOf();
+      if (still) cli.io.err(`note: still blocked by ${still}\n`);
       if (isJson(cmd)) return printJson(cli.io, entry ?? m);
       cli.io.out(`unblocked ${describe(m)} in ${file}\n`);
     });

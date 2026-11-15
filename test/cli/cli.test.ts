@@ -622,7 +622,7 @@ describe('cli security surface', () => {
     expect(sh.out).not.toContain('SKILL.md:\nbody');
     expect(JSON.parse((await s.run('--json', 'show', 'bad')).out).security.status).toBe('blocked');
     const w = await s.run('search', 'warny');
-    if (JSON.parse((await s.run('--json', 'search', 'warny')).out)[0].security.warnings > 0) expect(w.out).toMatch(/\[warnings: \d+\]/);
+    expect(w.out).toMatch(/\[warnings: \d+\]/);
     expect((await s.run('show', 'alpha')).out).toContain('status: warned');
     await s.run('install', 'alpha');
     const l = await s.run('list');
@@ -642,5 +642,80 @@ describe('cli security surface', () => {
     expect(o.err).toContain('remove it with: skillseekr remove alpha');
     const u = await s.run('update');
     expect(u.err).toContain('late find');
+  });
+
+  it('refuses to edit a broken or wrong-shaped config and leaves it byte-identical', async () => {
+    const blockCmds = [['block', 'x', '--reason', 'r'], ['unblock', 'x']];
+    const allowCmds = [['allow', 'bad', '--reason', 'r', '--yes'], ['allow', '--prune']];
+    const cases: Array<[string, string[][]]> = [
+      ['{ "registries": { ', [...blockCmds, ...allowCmds]],
+      ['[]', [...blockCmds, ...allowCmds]],
+      ['{ "registries": {}, "block": {} }', blockCmds],
+      ['{ "registries": {}, "allow": [] }', [allowCmds[0]!]],
+    ];
+    for (const [raw, cmds] of cases) {
+      const s = await setup({ raw, repos: withBad() });
+      for (const argv of cmds) {
+        const r = await s.run(...argv);
+        expect(r.code, `${raw} ${argv[0]}`).toBeGreaterThanOrEqual(1);
+        expect(await readFile(s.path, 'utf8')).toBe(raw);
+      }
+    }
+    const s = await setup({ raw: '{ "registries": { ' });
+    const r = await s.run('block', 'x', '--reason', 'r');
+    expect(r.code).toBe(2);
+    expect(r.err).toContain(s.path);
+  });
+
+  it('block rejects a blank id and notes an unknown id, suggesting by name', async () => {
+    const s = await setup({ registries: { one: gh('one') } });
+    expect((await s.run('block', '   ', '--reason', 'r')).code).toBe(1);
+    const n = await s.run('block', 'nothing/here', '--reason', 'r');
+    expect(n.code).toBe(0);
+    expect(n.err).toBe('note: no skill with id "nothing/here" is currently known; blocks match exact ids\n');
+    const d = await s.run('block', 'dup', '--reason', 'r');
+    expect(d.err).toContain('did you mean cat/dup?');
+    const known = await s.run('block', 'alpha', '--reason', 'r');
+    expect(known.err).toBe('');
+  });
+
+  it('unblock notes an include that still blocks the same id', async () => {
+    const inc = { type: 'github-registry', owner: 'o', repo: 'reg', ref: 'main', policy: true };
+    const s = await setup({
+      registries: { inc },
+      repos: { ...repos(), 'o/reg': { refs: { main: SHA }, commits: { [SHA]: { 'registries.jsonc': JSON.stringify({
+        registries: { one: gh('one') }, block: [{ id: 'alpha', reason: 'team says no', added: '2026-11-01' }] }) } } } },
+    });
+    expect((await s.run('block', 'alpha', '--reason', 'mine')).code).toBe(0);
+    const u = await s.run('unblock', 'alpha');
+    expect(u.code).toBe(0);
+    expect(u.err).toContain('note: still blocked by inc');
+  });
+
+  it('allow --prune refuses on an incomplete catalog; --list and --prune take no id', async () => {
+    const s = await setup({ registries: { one: gh('one'), ghost: gh('ghost') }, repos: withBad() });
+    const cur = JSON.parse(await cfg(s));
+    cur.allow = { gone: { content_hash: `sha256:${'1'.repeat(64)}`, rules: ['x/y'], reason: 'old', added: '2026-01-01' }, weird: 5 };
+    await writeFile(s.path, JSON.stringify(cur));
+    const before = await cfg(s);
+    const p = await s.run('allow', '--prune');
+    expect(p.code).toBe(1);
+    expect(p.err).toContain('catalog incomplete; prune would drop live entries');
+    expect(await cfg(s)).toBe(before);
+    expect((await s.run('allow', 'bad', '--list')).code).toBe(1);
+    expect((await s.run('allow', 'bad', '--prune')).code).toBe(1);
+  });
+
+  it('block keeps a symlinked config and its comments', async () => {
+    const s = await setup({ raw: '{\n  // keep me\n  "registries": {}\n}\n' });
+    const real = join(s.dir, 'real.jsonc');
+    const { rename } = await import('node:fs/promises');
+    await rename(s.path, real);
+    await symlink(real, s.path);
+    expect((await s.run('block', 'x', '--reason', 'r')).code).toBe(0);
+    expect((await lstat(s.path)).isSymbolicLink()).toBe(true);
+    const text = await readFile(real, 'utf8');
+    expect(text).toContain('// keep me');
+    expect(text).toContain('"id": "x"');
   });
 });

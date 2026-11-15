@@ -29,8 +29,10 @@ export function removeRegistry(text: string, name: string): string {
 
 function arrayAt(text: string, key: string): unknown[] {
   const root = parseTree(text, [], { allowTrailingComma: true });
-  const node = root && findNodeAtLocation(root, [key]);
-  if (!node || node.type !== 'array') return [];
+  if (!root || root.type !== 'object') throw new Error('the top level must be an object');
+  const node = findNodeAtLocation(root, [key]);
+  if (!node) return [];
+  if (node.type !== 'array') throw new Error(`"${key}" must be an array`);
   return (node.children ?? []).map((n) => getNodeValue(n) as unknown);
 }
 
@@ -55,15 +57,24 @@ export function removeBlock(text: string, match: { id: string } | { content_hash
   return applyEdits(text, modify(text, ['block', idx], undefined, { formattingOptions }));
 }
 
+function assertAllowObject(text: string) {
+  const root = parseTree(text, [], { allowTrailingComma: true });
+  if (!root || root.type !== 'object') throw new Error('the top level must be an object');
+  const node = findNodeAtLocation(root, ['allow']);
+  if (node && node.type !== 'object') throw new Error('"allow" must be an object');
+  return root;
+}
+
 /** Sets (adds or replaces) `allow.<id>`, keeping comments. */
 export function setAllow(text: string, id: string, entry: AllowEntry): string {
+  assertAllowObject(text);
   return applyEdits(text, modify(text, ['allow', id], entry, { formattingOptions }));
 }
 
 /** Removes `allow.<id>`. Throws if there is none. */
 export function removeAllow(text: string, id: string): string {
-  const root = parseTree(text, [], { allowTrailingComma: true });
-  if (!root || !findNodeAtLocation(root, ['allow', id])) throw new Error(`no allow entry for "${id}"`);
+  const root = assertAllowObject(text);
+  if ( !findNodeAtLocation(root, ['allow', id])) throw new Error(`no allow entry for "${id}"`);
   return applyEdits(text, modify(text, ['allow', id], undefined, { formattingOptions }));
 }
 

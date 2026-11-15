@@ -61,6 +61,26 @@ export async function readConfigText(file: string, missing: string | undefined):
   }
 }
 
+/** Reads the local config for editing; refuses (exit 2) when it does not parse, so a broken file is never rewritten. */
+export async function readEditable(file: string, missing: string): Promise<string> {
+  const text = await readConfigText(file, missing);
+  const bad = parseRegistriesFile(text, { file, isLocalConfig: true }).problems.filter((p) => p.code === 'config/parse-error');
+  if (bad.length > 0) throw new CliError(`${file} does not parse; fix it before editing (${bad.map((p) => p.message).join('; ')})`, 2);
+  return text;
+}
+
+/** Runs an edit helper, turning its errors into CliError. */
+export function guardEdit<T>(file: string, fn: () => T): T {
+  try { return fn(); } catch (e) { throw new CliError(`cannot edit ${file}: ${e instanceof Error ? e.message : String(e)}`); }
+}
+
+/** Re-checks the edited text, then writes it atomically. */
+export async function writeEdited(file: string, next: string): Promise<void> {
+  const bad = parseRegistriesFile(next, { file, isLocalConfig: true }).problems.filter((p) => p.code === 'config/parse-error');
+  if (bad.length > 0) throw new CliError(`refusing to write ${file}: the edited config would not parse`);
+  await writeAtomic(file, next);
+}
+
 function printRegistries(cli: Cli, r: Awaited<ReturnType<ReturnType<Cli['engine']>['registries']>>): void {
   const rows = [['NAME', 'TYPE', 'VIA', 'SKILLS', 'REF', 'SHA', 'NOTES']];
   for (const v of r.registries) {
