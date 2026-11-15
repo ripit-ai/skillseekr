@@ -130,9 +130,18 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
         continue;
       }
 
+      const honoured = entry.policy && depth === 1;
+      /** Minor 4: a policy include that gave no policy (fetch or parse failed) is a security problem of its own. */
+      const policyUnavailable = (why: string): void => {
+        problems.push({
+          level: 'error', code: 'policy/source-unavailable', registry: name, via, file: fileLabel(entry),
+          message: `policy include "${name}" (${fileLabel(entry)}) could not be ${why}, so its block entries are NOT in force (and its allow entries do not apply)`,
+        });
+      };
       const r = await load(entry, id, lvl.trusted);
       if ('error' in r) {
         problems.push({ ...r.error, registry: name, via, file: r.error.file ?? lvl.file });
+        if (honoured) policyUnavailable('loaded');
         continue;
       }
       for (const p of r.problems) problems.push({ ...p, registry: name, via, file: p.file ?? lvl.file });
@@ -143,7 +152,8 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
 
       const file = fileLabel(entry);
       const { parsed } = r;
-      const honoured = entry.policy && depth === 1;
+      const unparsed = parsed.problems.some((p) => p.code === 'config/parse-error');
+      if (honoured && unparsed) policyUnavailable('parsed');
       for (const p0 of parsed.problems) {
         let p = p0;
         const pk = p0.code === 'policy/invalid-entry' ? policyProblemKey(p0) : undefined;
@@ -159,7 +169,7 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
         });
       };
       const pol = parsed.policy;
-      if (honoured) { if (!policySeen.has(id)) { policySeen.add(id); policy.sources.push({ source: { kind: 'include', name, via, file }, allow: pol.allow, block: pol.block }); } }
+      if (honoured) { if (!unparsed && !policySeen.has(id)) { policySeen.add(id); policy.sources.push({ source: { kind: 'include', name, via, file }, allow: pol.allow, block: pol.block }); } }
       else {
         if (Object.keys(pol.allow).length > 0) ignored('allow', 'policy/ignored-allow', 'only the local config and policy:true includes from it may allow');
         if (pol.block.length > 0) ignored('block', 'policy/ignored-block', 'only the local config and policy:true includes from it may block');

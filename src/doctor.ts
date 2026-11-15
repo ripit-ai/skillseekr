@@ -132,6 +132,7 @@ export async function doctor(engine: Engine, ctx: Ctx, opts: { vscodeWorkspace?:
   }
   const allows = catalog.policy.sources.filter((s) => s.source.kind === 'local').flatMap((s) => Object.entries(s.allow));
   if (allows.length > 0) add('policy:allow', 'warn', `${allows.length} local allow ${allows.length === 1 ? 'entry' : 'entries'}: ${list(allows.map(([id, a]) => `${id} (added ${a.added}; rules: ${a.rules.join(', ')})`))}`);
+  for (const p of catalog.problems.filter((x) => x.code === 'policy/source-unavailable')) add(`policy:source:${p.registry ?? '?'}`, 'fail', p.message);
   const ignored = catalog.problems.filter((p) => p.code.startsWith('policy/ignored-'));
   if (ignored.length > 0) add('policy:ignored', 'warn', list([...new Set(ignored.map((p) => p.message))]));
   const dups = nearDuplicates(catalog.skills.filter((k) => k.security.status !== 'blocked'));

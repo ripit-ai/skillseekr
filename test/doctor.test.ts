@@ -148,6 +148,17 @@ describe('doctor', () => {
     expect(ids.filter((i) => /^(security|policy|quality|trust)/.test(i))).toEqual([]);
   });
 
+  it('Minor 4: a policy include that fails to load is a fail under policy:source:<name>', async () => {
+    const e = await env(undefined);
+    const github = fakeGithub({ 'o/pol': { refs: { main: SHA }, commits: { [SHA]: { 'registries.jsonc': '{ nope' } } } });
+    const ctx: Ctx = { ...e.ctx, http: github.http };
+    await writeFile(e.file, JSON.stringify({ registries: { pol: { type: 'github-registry', owner: 'o', repo: 'pol', ref: 'main', policy: true } } }));
+    const { checks } = await doctor(createEngine(ctx), ctx);
+    const c = checks.find((x) => x.id === 'policy:source:pol');
+    expect(c).toMatchObject({ status: 'fail' });
+    expect(c?.message).toContain('block entries are NOT in force');
+  });
+
   it('policy:ignored is reported for allow/block entries in an include that is not a policy include', async () => {
     const e = await env(undefined);
     const github = fakeGithub({

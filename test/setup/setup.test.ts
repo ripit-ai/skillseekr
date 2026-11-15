@@ -325,6 +325,43 @@ describe('setup', () => {
     expect((parseJsonc(text) as { trust: unknown }).trust).toEqual([{ owner: 'acme', public_keys: [a, b] }]);
   });
 
+  it('T12: setup --trust merges into a config that appeared between plan and apply, never over it', async () => {
+    const e = await env();
+    const k = createKeyPair().publicKey;
+    const theirs = '// theirs\n{ "registries": { "mine": { "type": "github", "owner": "me", "repo": "r", "skills_dir": "s", "ref": "main" } } }\n';
+    const r = await setup(e.ctx, {
+      yes: false, trust: [`acme=${k}`],
+      confirm: async () => {
+        await mkdir(join(e.home, '.config', 'skillseekr'), { recursive: true });
+        await writeFile(e.configFile, theirs);
+        return true;
+      },
+    });
+    const text = await readFile(e.configFile, 'utf8');
+    expect(text.startsWith('// theirs')).toBe(true);
+    const cfg = parseJsonc(text) as { registries: object; trust: unknown };
+    expect(Object.keys(cfg.registries)).toEqual(['mine']);
+    expect(cfg.trust).toEqual([{ owner: 'acme', public_keys: [k] }]);
+    expect(r.errors).toEqual([]);
+  });
+
+  it('T12: setup --trust leaves an unparseable config that appeared alone and reports it', async () => {
+    const e = await env();
+    const k = createKeyPair().publicKey;
+    const theirs = '{ "registries": { broken\n';
+    const r = await setup(e.ctx, {
+      yes: false, trust: [`acme=${k}`],
+      confirm: async () => {
+        await mkdir(join(e.home, '.config', 'skillseekr'), { recursive: true });
+        await writeFile(e.configFile, theirs);
+        return true;
+      },
+    });
+    expect(await readFile(e.configFile, 'utf8')).toBe(theirs);
+    expect(r.errors).toEqual([expect.stringContaining('trust was not added')]);
+    expect(r.changes.some((c) => c.after?.startsWith('trust:'))).toBe(false);
+  });
+
   it('setup --trust with a bad key or spec throws and writes nothing', async () => {
     const e = await env();
     await expect(setup(e.ctx, { yes: true, trust: ['acme=ed25519:not-a-key'] })).rejects.toThrow(/invalid public key/);

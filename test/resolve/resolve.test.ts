@@ -218,6 +218,39 @@ describe('resolve', () => {
     expect(r.problems).toEqual([expect.objectContaining({ level: 'warning', code: 'source/stale', registry: 'A', via: ['A'], file: config.path })]);
   });
 
+  it('Minor 4: a policy include that cannot be fetched or parsed is an error problem saying its blocks are not in force', async () => {
+    const block = { block: [{ id: 'evil', reason: 'r', added: '2026-11-14' }] };
+    const { config, ctx } = await setup({
+      local: { P: ghInclude('p', { policy: true }), Q: ghInclude('q', { policy: true }), N: ghInclude('n'), G: ghInclude('g', { policy: true }) },
+      repos: {
+        'o/q': { refs: { main: SHA }, commits: { [SHA]: { 'registries.jsonc': '{ "registries": { , ' } } },
+        'o/n': { refs: { main: SHA }, commits: { [SHA]: { 'registries.jsonc': '{ broken' } } },
+        'o/g': repoWith({}, block),
+      },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    const un = r.problems.filter((p) => p.code === 'policy/source-unavailable');
+    expect(un.map((p) => [p.level, p.registry, p.via, p.file])).toEqual([
+      ['error', 'P', ['P'], 'github:o/p@main:registries.jsonc'],
+      ['error', 'Q', ['Q'], 'github:o/q@main:registries.jsonc'],
+    ]);
+    expect(un[0]!.message).toContain('could not be loaded, so its block entries are NOT in force');
+    expect(un[1]!.message).toContain('could not be parsed, so its block entries are NOT in force');
+    expect(r.policy.sources.map((x) => x.source.kind === 'include' ? x.source.name : 'local')).toEqual(['local', 'G']);
+  });
+
+  it('Minor 4: a policy include served from the stale cache is honoured, with no source-unavailable problem', async () => {
+    const { config, ctx, github } = await setup({
+      local: { P: ghInclude('p', { policy: true }) }, repos: { 'o/p': repoWith({}, { block: [{ id: 'evil', reason: 'r', added: '2026-11-14' }] }) },
+    });
+    await resolve(config, { force: false }, ctx);
+    github.offline(true);
+    const r = await resolve(config, { force: true }, ctx);
+    expect(r.stale).toBe(true);
+    expect(r.problems.map((p) => p.code)).toEqual(['source/stale']);
+    expect(r.policy.sources[1]).toMatchObject({ source: { kind: 'include', name: 'P' }, block: [{ id: 'evil' }] });
+  });
+
   it('passes config problems through', async () => {
     const { config, ctx } = await setup({ local: { z: gh('z') } });
     config.problems.push({ level: 'error', code: 'config/invalid-entry', message: 'bad', file: config.path });

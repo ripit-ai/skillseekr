@@ -5,7 +5,7 @@ import type { SkillRecord } from '../catalog/catalog.js';
 import { parseFrontmatter } from '../catalog/frontmatter.js';
 import { CLEAN } from '../policy/evaluate.js';
 import { contentHash } from '../catalog/hash.js';
-import { parse as parseJsonc } from 'jsonc-parser';
+import { parse as parseJsonc, printParseErrorCode, type ParseError } from 'jsonc-parser';
 import { writeFileAtomic } from '../atomicWrite.js';
 import { defaultConfigText, setTrust } from '../config/edit.js';
 import { publicKeyFromString } from '../sign/sign.js';
@@ -196,8 +196,22 @@ export async function setup(ctx: Ctx, opts: SetupOptions): Promise<SetupResult> 
     }
   }
   if (trustedConfig !== baseConfig) {
-    await writeFileAtomic(cfg, trustedConfig);
-    changes.push(planned.find((c) => c.file === cfg && c.after?.startsWith('trust:'))!);
+    // T12: merge into the config as it is now (one may have appeared or changed since the plan), never over it.
+    let merged: string | undefined;
+    let current = '';
+    try {
+      current = await readFile(cfg, 'utf8');
+      const errs: ParseError[] = [];
+      parseJsonc(current, errs, { allowTrailingComma: true });
+      if (errs.length > 0) throw new Error(`${printParseErrorCode(errs[0]!.error)} at offset ${errs[0]!.offset}`);
+      merged = withTrust(current, trust);
+    } catch (e) {
+      errors.push(`config: trust was not added to ${cfg}, which changed since the plan and could not be read or parsed (${msg(e)}); add it with "skillseekr setup --trust" again`);
+    }
+    if (merged !== undefined && merged !== current) {
+      await writeFileAtomic(cfg, merged);
+      changes.push(planned.find((c) => c.file === cfg && c.after?.startsWith('trust:'))!);
+    }
   }
   for (const r of regs) {
     try {
