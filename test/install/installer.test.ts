@@ -5,6 +5,7 @@ import type { Ctx } from '../../src/context.js';
 import { Catalog, type SkillRecord } from '../../src/catalog/catalog.js';
 import { contentHash } from '../../src/catalog/hash.js';
 import type { ResolvedRegistry } from '../../src/resolve/resolve.js';
+import { CLEAN } from '../../src/policy/evaluate.js';
 import {
   fsHooks, installSkill, listInstalled, statusOf, removeInstalled, updateInstalled, InstallError,
 } from '../../src/install/installer.js';
@@ -30,7 +31,7 @@ async function mkSkill(src: string, id: string, files: Record<string, string> = 
   const dir = join(src, id);
   await put(dir, files);
   const { hash, files: list } = await contentHash(dir);
-  return { id, name, description: 'd', dir, files: list, contentHash: hash, warnings: [], registry: 'reg', via: ['top', 'reg'], ref: 'main', sha: 'abc1234' };
+  return { id, name, description: 'd', dir, files: list, contentHash: hash, warnings: [], registry: 'reg', via: ['top', 'reg'], ref: 'main', sha: 'abc1234', security: CLEAN };
 }
 const catalogOf = (...skills: SkillRecord[]) => {
   const reg = { name: 'reg', via: ['top', 'reg'], entry: {} } as unknown as ResolvedRegistry;

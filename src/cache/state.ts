@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 // Small JSON records under <cacheDir>/state/, one file per key. The file name is a hash of the
 // key, so keys (which hold refs like "feature/x" or untrusted names) can never form a path.
@@ -18,18 +18,21 @@ export async function readState<T>(cacheDir: string, key: string): Promise<T | u
 }
 
 /** Atomic: a unique temp file in the same dir, then rename over the target (readers never see a partial file). */
-export async function writeState(cacheDir: string, key: string, value: unknown): Promise<void> {
-  await mkdir(cacheDir, { recursive: true, mode: 0o700 });
-  const file = stateFile(cacheDir, key);
-  await mkdir(join(cacheDir, 'state'), { recursive: true, mode: 0o700 });
+export async function writeCacheFile(file: string, data: string): Promise<void> {
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
   try {
-    await writeFile(tmp, JSON.stringify({ key, value }), { mode: 0o600 });
+    await writeFile(tmp, data, { mode: 0o600 });
     await rename(tmp, file);
   } catch (e) {
     await rm(tmp, { force: true }).catch(() => {});
     throw e;
   }
+}
+
+export async function writeState(cacheDir: string, key: string, value: unknown): Promise<void> {
+  await mkdir(cacheDir, { recursive: true, mode: 0o700 });
+  await writeCacheFile(stateFile(cacheDir, key), JSON.stringify({ key, value }));
 }
 
 /**

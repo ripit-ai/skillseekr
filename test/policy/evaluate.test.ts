@@ -109,4 +109,18 @@ describe('evaluate', () => {
     expect(r.status).toBe('blocked');
     expect(r.note).toBeUndefined();
   });
+
+  it('block beats allow across sources, in either order', () => {
+    const f = [crit('a/1')];
+    const block: BlockEntry[] = [{ id: 'o/skill', reason: 'incident', added: '2026-11-14' }];
+    const okAllow = { 'o/skill': allow() };
+    // include block, local allow
+    const r1 = evaluate(skill, f, pol({ source: local, allow: okAllow }, { source: inc, block }));
+    expect(r1).toMatchObject({ status: 'blocked', blockedBy: { kind: 'deny', entry: block[0], source: inc } });
+    expect(r1.allowedBy).toBeUndefined();
+    // local block, include allow
+    const r2 = evaluate(skill, f, pol({ source: local, block }, { source: inc, allow: okAllow }));
+    expect(r2).toMatchObject({ status: 'blocked', blockedBy: { kind: 'deny', entry: block[0], source: local } });
+    expect(r2.allowedBy).toBeUndefined();
+  });
 });

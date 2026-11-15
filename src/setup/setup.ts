@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { SkillRecord } from '../catalog/catalog.js';
 import { parseFrontmatter } from '../catalog/frontmatter.js';
+import { CLEAN } from '../policy/evaluate.js';
 import { contentHash } from '../catalog/hash.js';
 import { defaultConfigText } from '../config/edit.js';
 import type { Ctx } from '../context.js';
@@ -63,7 +64,7 @@ export async function starterSkill(): Promise<SkillRecord> {
   const { hash, files } = await contentHash(dir);
   return {
     id: STARTER_NAME, name: STARTER_NAME, description: String(fm.data.description ?? ''),
-    dir, files, contentHash: hash, warnings: [], registry: 'builtin', via: [],
+    dir, files, contentHash: hash, warnings: [], registry: 'builtin', via: [], security: CLEAN, // shipped with skillseekr
   };
 }
 

@@ -3,10 +3,14 @@ import { resolve, sep, isAbsolute } from 'node:path';
 import type { DiscoveredSkill } from './discover.js';
 import type { ResolvedRegistry, Override } from '../resolve/resolve.js';
 import type { Problem } from '../types.js';
+import { CLEAN, type Security, type SecurityStatus } from '../policy/evaluate.js';
+import { EMPTY_POLICY, type Policy } from '../policy/types.js';
 import { Bm25Index } from './search.js';
 import { MAX_FILE_BYTES, SNIFF_BYTES } from './limits.js';
 
-export interface SkillRecord extends DiscoveredSkill { registry: string; via: string[]; ref?: string; sha?: string; instructions?: string }
+export interface SkillRecord extends DiscoveredSkill { registry: string; via: string[]; ref?: string; sha?: string; instructions?: string; security: Security }
+/** A discovered skill with its verdict; a skill without one is CLEAN (catalogs built directly, as in Phase 1 tests). */
+export type CatalogSkill = DiscoveredSkill & { security?: Security };
 export type Lookup = { kind: 'found'; skill: SkillRecord } | { kind: 'ambiguous'; ids: string[] } | { kind: 'missing' };
 export type FileRead =
   | { kind: 'text'; content: string }
@@ -16,6 +20,19 @@ export type FileRead =
 export interface SearchHit {
   id: string; name: string; description: string; registry: string; via: string[]; score: number;
   overrode: Array<{ registry: string; via: string[] }>;
+  security: { status: SecurityStatus; allowedBy?: string; warnings: number };
+}
+
+/** Why a blocked skill is refused: the deny entry's reason, or the first critical finding's rule and place. */
+export function blockedReason(sec: Security): string {
+  const by = sec.blockedBy;
+  if (by?.kind === 'deny') {
+    const what = 'id' in by.entry ? `id ${by.entry.id}` : `content_hash ${by.entry.content_hash}`;
+    const where = by.source.kind === 'local' ? 'the local config' : `policy include "${by.source.name}"`;
+    return `skill is blocked by a block entry (${what}) in ${where}: ${by.entry.reason}`;
+  }
+  const f = sec.findings.find((x) => x.severity === 'critical');
+  return f ? `skill is blocked: ${f.rule} in ${f.file}:${f.line}` : 'skill is blocked';
 }
 
 const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
@@ -25,12 +42,15 @@ export class Catalog {
   readonly overrides: Override[];
   readonly problems: Problem[];
   readonly stale: boolean;
+  readonly policy: Policy;
   private readonly ids = new Map<string, SkillRecord>();
   private index?: Bm25Index;
+  /** Skills search may return: everything but blocked ones, which are also left out of the index. */
+  private readonly searchable: SkillRecord[];
 
   constructor(
-    perRegistry: Array<{ registry: ResolvedRegistry; ref?: string; sha?: string; skills: DiscoveredSkill[] }>,
-    overrides: Override[], problems: Problem[], stale: boolean,
+    perRegistry: Array<{ registry: ResolvedRegistry; ref?: string; sha?: string; skills: CatalogSkill[] }>,
+    overrides: Override[], problems: Problem[], stale: boolean, policy: Policy = EMPTY_POLICY,
   ) {
     const skillOverrides: Override[] = [];
     for (const r of perRegistry) {
@@ -44,7 +64,7 @@ export class Catalog {
             by: { registry: r.registry.name, via: r.registry.via },
           });
         }
-        const rec: SkillRecord = { ...s, registry: r.registry.name, via: r.registry.via };
+        const rec: SkillRecord = { ...s, registry: r.registry.name, via: r.registry.via, security: s.security ?? CLEAN };
         if (r.ref !== undefined) rec.ref = r.ref;
         if (r.sha !== undefined) rec.sha = r.sha;
         if (instructions !== undefined) rec.instructions = instructions;
@@ -55,6 +75,13 @@ export class Catalog {
     this.overrides = [...overrides, ...skillOverrides];
     this.problems = problems;
     this.stale = stale;
+    this.policy = policy;
+    this.searchable = this.skills.filter((s) => s.security.status !== 'blocked');
+  }
+
+  /** Blocked skills, sorted by id. They stay findable by lookup/byId so callers can explain the refusal. */
+  blocked(): SkillRecord[] {
+    return this.skills.filter((s) => s.security.status === 'blocked');
   }
 
   /** Exact skill-id match only (no bare-name fallback): for installed markers, whose id must still exist. */
@@ -76,6 +103,7 @@ export class Catalog {
   }
 
   async readFile(skill: SkillRecord, relPath: string): Promise<FileRead> {
+    if (skill.security.status === 'blocked') return { kind: 'refused', reason: blockedReason(skill.security) };
     if (relPath === '') return { kind: 'refused', reason: 'empty path' };
     if (relPath.includes('\0')) return { kind: 'refused', reason: 'path contains NUL' };
     if (isAbsolute(relPath) || relPath.startsWith('/') || relPath.startsWith('\\')) {
@@ -123,15 +151,20 @@ export class Catalog {
   }
 
   search(query: string, limit = 10): SearchHit[] {
-    this.index ??= new Bm25Index(this.skills);
+    this.index ??= new Bm25Index(this.searchable);
     const scores = this.index.scores(query);
     const hits: SearchHit[] = [];
-    this.skills.forEach((s, i) => {
+    this.searchable.forEach((s, i) => {
       const score = scores[i]!;
       if (score > 0) {
         hits.push({
           id: s.id, name: s.name, description: s.description, registry: s.registry, via: s.via, score,
           overrode: this.overridesFor(s.id).map((o) => o.replaced),
+          security: {
+            status: s.security.status,
+            ...(s.security.allowedBy ? { allowedBy: s.security.allowedBy.label } : {}),
+            warnings: s.security.findings.filter((f) => f.severity === 'warning').length,
+          },
         });
       }
     });

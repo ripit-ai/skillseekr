@@ -4,6 +4,9 @@ import { join, resolve } from 'node:path';
 import { Catalog, type SkillRecord } from '../../src/catalog/catalog.js';
 import { discoverSkills, type DiscoveredSkill } from '../../src/catalog/discover.js';
 import type { ResolvedRegistry } from '../../src/resolve/resolve.js';
+import { CLEAN, type Security } from '../../src/policy/evaluate.js';
+import { EMPTY_POLICY, type Policy } from '../../src/policy/types.js';
+import type { Finding } from '../../src/scan/scan.js';
 import { tmpDir } from '../helpers/tmp.js';
 
 const FX = resolve(import.meta.dirname, '../fixtures/skills');
@@ -125,5 +128,74 @@ describe('Catalog readFile', () => {
     await mkdir(join(dir, 'u'), { recursive: true });
     await writeFile(join(dir, 'u/x.txt'), 'héllo €');
     expect(await c.readFile(s, 'u/x.txt')).toEqual({ kind: 'text', content: 'héllo €' });
+  });
+});
+
+describe('Catalog security', () => {
+  const crit = (rule: string, file = 'scripts/a.sh', line = 3): Finding => ({ rule, severity: 'critical', file, line, message: 'm' });
+  const warnF = (rule: string): Finding => ({ rule, severity: 'warning', file: 'SKILL.md', line: 1, message: 'm' });
+  const withSec = (id: string, security: Security, name = id): DiscoveredSkill & { security: Security } =>
+    ({ ...sk(id, name), description: `${name} deploy helper`, security });
+  const blockedScan: Security = { status: 'blocked', findings: [warnF('w/1'), crit('download-and-run/curl-pipe-shell')], blockedBy: { kind: 'scan', rules: ['download-and-run/curl-pipe-shell'] } };
+  const blockedDeny: Security = {
+    status: 'blocked', findings: [],
+    blockedBy: { kind: 'deny', entry: { id: 'bad', reason: 'posts env to a third party', added: '2026-11-14' }, source: { kind: 'local', file: '/c.jsonc' } },
+  };
+  const allowed: Security = { status: 'allowed', findings: [crit('x/y'), warnF('w/1'), warnF('w/2')], allowedBy: { label: 'corp', rules: ['x/y'], added: '2026-11-14', reason: 'ok' } };
+  const warned: Security = { status: 'warned', findings: [warnF('w/1')] };
+
+  it('a skill without a security verdict defaults to CLEAN, and the policy to EMPTY_POLICY', () => {
+    const c = cat([reg('a'), [sk('s')]]);
+    expect(c.skills[0]!.security).toBe(CLEAN);
+    expect(c.policy).toBe(EMPTY_POLICY);
+    const p: Policy = { sources: [], trust: [{ owner: 'o', public_keys: [] }] };
+    expect(new Catalog([], [], [], false, p).policy).toBe(p);
+  });
+
+  it('search skips blocked skills; hits carry status, allowedBy label and the warning count', () => {
+    const c = new Catalog([{ registry: reg('a'), skills: [withSec('bad', blockedScan), withSec('denied', blockedDeny), withSec('ok', allowed), withSec('w', warned), { ...sk('plain'), description: 'plain deploy helper' }] }], [], [], false);
+    const hits = c.search('deploy');
+    expect(hits.map((h) => h.id).sort()).toEqual(['ok', 'plain', 'w']);
+    const by = Object.fromEntries(hits.map((h) => [h.id, h.security]));
+    expect(by.ok).toEqual({ status: 'allowed', allowedBy: 'corp', warnings: 2 });
+    expect(by.w).toEqual({ status: 'warned', warnings: 1 });
+    expect(by.plain).toEqual({ status: 'clean', warnings: 0 });
+  });
+
+  it('blocked() lists blocked skills sorted by id; lookup and byId still find them', () => {
+    const c = new Catalog([{ registry: reg('a'), skills: [withSec('z/bad', blockedScan, 'bad'), withSec('ok', warned), withSec('a/denied', blockedDeny)] }], [], [], false);
+    expect(c.blocked().map((s) => s.id)).toEqual(['a/denied', 'z/bad']);
+    const r = c.lookup('z/bad');
+    expect(r.kind === 'found' && r.skill.security.status).toBe('blocked');
+    expect(c.lookup('bad')).toMatchObject({ kind: 'found' }); // bare name too
+    expect(c.byId('a/denied')?.security.status).toBe('blocked');
+  });
+
+  it('readFile refuses a blocked skill, naming the first critical rule and its place, or the deny reason', async () => {
+    const root = await tmpDir();
+    await cp(join(FX, 'flat'), root, { recursive: true });
+    const [found] = (await discoverSkills(root, 'skills')).filter((x) => x.id === 'another-skill');
+    const c = new Catalog([{ registry: reg('a'), skills: [
+      { ...found!, security: blockedScan },
+      { ...found!, id: 'denied', security: blockedDeny },
+      { ...found!, id: 'allowed', security: allowed },
+    ] }], [], [], false);
+    expect(await c.readFile(c.byId('another-skill')!, 'SKILL.md')).toEqual({
+      kind: 'refused', reason: 'skill is blocked: download-and-run/curl-pipe-shell in scripts/a.sh:3',
+    });
+    const denied = await c.readFile(c.byId('denied')!, 'SKILL.md');
+    expect(denied.kind).toBe('refused');
+    expect(denied.kind === 'refused' && denied.reason).toContain('posts env to a third party');
+    expect((await c.readFile(c.byId('allowed')!, 'SKILL.md')).kind).toBe('text');
+  });
+
+  it('a blocked winner still hides the skill it replaced, and the override is recorded', () => {
+    const c = new Catalog([
+      { registry: reg('a'), skills: [withSec('s', warned)] },
+      { registry: reg('b'), skills: [withSec('s', blockedScan)] },
+    ], [], [], false);
+    expect(c.skills.map((x) => [x.id, x.registry, x.security.status])).toEqual([['s', 'b', 'blocked']]);
+    expect(c.search('deploy')).toEqual([]);
+    expect(c.overrides).toEqual([{ kind: 'skill', key: 's', replaced: { registry: 'a', via: ['a'] }, by: { registry: 'b', via: ['b'] } }]);
   });
 });

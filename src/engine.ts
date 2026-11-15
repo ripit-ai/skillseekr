@@ -1,12 +1,19 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, open, readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Ctx } from './context.js';
-import { Catalog } from './catalog/catalog.js';
+import { Catalog, type CatalogSkill } from './catalog/catalog.js';
 import { discoverSkills, type DiscoveredSkill } from './catalog/discover.js';
 import { loadConfig } from './config/load.js';
+import { MAX_FILE_BYTES } from './catalog/limits.js';
 import { configPath } from './paths.js';
-import { readState } from './cache/state.js';
+import { evaluate } from './policy/evaluate.js';
+import { EMPTY_POLICY, type Policy } from './policy/types.js';
+import { cachedScan } from './scan/cache.js';
+import { qualityFindings } from './scan/quality.js';
+import { scanSkillDir, type Finding } from './scan/scan.js';
+import { SIGNATURE_FILE, verifySkillDir } from './sign/sign.js';
+import { readState, writeCacheFile } from './cache/state.js';
 import { resolve, ttlFor, type IncludeInfo, type Override, type ResolvedRegistry } from './resolve/resolve.js';
 import { isShaRef, materializeGithub, type FetchOpts } from './sources/github.js';
 import { materializeHttpSkill } from './sources/http.js';
@@ -24,7 +31,7 @@ export interface Engine {
   /** `overrides` holds every override: registry-name ones first, then skill-id ones (same as the catalog's). */
   registries(): Promise<{ registries: RegistryView[]; includes: IncludeInfo[]; overrides: Override[]; problems: Problem[] }>;
 }
-export interface EngineDeps { discover?: typeof discoverSkills }
+export interface EngineDeps { discover?: typeof discoverSkills; scan?: typeof scanSkillDir }
 
 /** What a memo was built from; any change to either means the memo is stale. */
 interface Stamps { configFile: string; config: string; generationFile: string; generation: string }
@@ -55,6 +62,29 @@ async function generationStamp(file: string): Promise<string> {
   try { return await readFile(file, 'utf8'); } catch { return 'absent'; }
 }
 
+/** SKILL.md as text, at most MAX_FILE_BYTES of it; '' when it isn't a readable regular file. */
+async function readSkillMd(dir: string): Promise<string> {
+  try {
+    const file = join(dir, 'SKILL.md');
+    if (!(await lstat(file)).isFile()) return '';
+    const fh = await open(file, 'r');
+    try {
+      const buf = Buffer.alloc(MAX_FILE_BYTES);
+      const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+      return buf.subarray(0, bytesRead).toString('utf8');
+    } finally { await fh.close(); }
+  } catch { return ''; }
+}
+
+const MAX_CHANGED_NAMES = 10;
+
+function signatureFinding(r: { changed: string[]; error?: string }): Finding {
+  const names = r.changed.slice(0, MAX_CHANGED_NAMES).join(', ') + (r.changed.length > MAX_CHANGED_NAMES ? ` and ${r.changed.length - MAX_CHANGED_NAMES} more` : '');
+  const parts = [r.error !== undefined ? `signature check failed: ${r.error}` : 'files do not match the signature'];
+  if (names !== '') parts.push(`changed: ${names}`);
+  return { rule: 'integrity/signature', severity: 'critical', file: SIGNATURE_FILE, line: 1, message: parts.join('; ') };
+}
+
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -65,20 +95,30 @@ function validSkills(v: unknown): v is DiscoveredSkill[] {
     && Array.isArray(s.files) && Array.isArray(s.warnings));
 }
 
-async function writeAtomic(file: string, data: string): Promise<void> {
-  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  const tmp = `${file}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
-  try {
-    await writeFile(tmp, data, { mode: 0o600 });
-    await rename(tmp, file);
-  } catch (e) {
-    await rm(tmp, { force: true }).catch(() => {});
-    throw e;
-  }
-}
-
 export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
   const discover = deps.discover ?? discoverSkills;
+  const scan = deps.scan ?? scanSkillDir;
+
+  /**
+   * Scan (cached by content hash and rules version) + quality + signature (only for a github owner the local config
+   * trusts), then the block/allow verdict. Skills in one registry are checked one at a time.
+   */
+  async function secure(skills: DiscoveredSkill[], entry: SourceEntry, policy: Policy, cacheDir: string): Promise<CatalogSkill[]> {
+    const keys = entry.type === 'github'
+      ? policy.trust.filter((t) => t.owner.toLowerCase() === entry.owner.toLowerCase()).flatMap((t) => t.public_keys)
+      : [];
+    const out: CatalogSkill[] = [];
+    for (const s of skills) {
+      const scanned = await cachedScan(cacheDir, s.contentHash, () => scan(s.dir, s.files));
+      const findings = [...scanned.findings, ...await qualityFindings(s, await readSkillMd(s.dir))];
+      if (keys.length > 0) {
+        const v = await verifySkillDir(s.dir, s.files, keys);
+        if (!v.ok) findings.push(signatureFinding(v));
+      }
+      out.push({ ...s, security: evaluate(s, findings, policy) });
+    }
+    return out;
+  }
   let memo: { promise: Promise<Loaded>; done?: Loaded } | undefined;
 
   async function indexed(cache: CacheSettings, owner: string, repo: string, sha: string, skillsDir: string, root: string): Promise<DiscoveredSkill[]> {
@@ -88,11 +128,11 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
       if (validSkills(parsed)) return parsed;
     } catch { /* missing or unreadable: recompute */ }
     const skills = await discover(root, skillsDir);
-    await writeAtomic(file, JSON.stringify(skills)).catch(() => {});
+    await writeCacheFile(file, JSON.stringify(skills)).catch(() => {});
     return skills;
   }
 
-  async function loadOne(reg: ResolvedRegistry, config: Config, force: boolean) {
+  async function loadOne(reg: ResolvedRegistry, config: Config, force: boolean, policy: Policy) {
     const { entry } = reg;
     const attach = (p: Problem): Problem => ({ ...p, registry: reg.name, via: reg.via });
     const fo: FetchOpts = {
@@ -100,7 +140,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
       ttlSeconds: ttlFor(config, entry),
     };
     const problems: Problem[] = [];
-    let skills: DiscoveredSkill[] = [];
+    let skills: CatalogSkill[] = [];
     let sha: string | undefined;
     let stale = false;
     let cacheAgeSeconds: number | undefined;
@@ -114,7 +154,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
         } else {
           sha = r.sha; stale = r.stale;
           problems.push(...r.problems.map(attach));
-          skills = await indexed(config.cache, entry.owner, entry.repo, r.sha, entry.skills_dir, r.root);
+          skills = await secure(await indexed(config.cache, entry.owner, entry.repo, r.sha, entry.skills_dir, r.root), entry, policy, config.cache.dir);
           if (recheck) {
             const rec = await readState<{ checkedAt?: unknown }>(config.cache.dir, `ref/${entry.owner}/${entry.repo}/${entry.ref}`);
             if (typeof rec?.checkedAt === 'number') cacheAgeSeconds = (ctx.now() - rec.checkedAt) / 1000;
@@ -128,7 +168,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
         } else {
           stale = r.stale;
           problems.push(...r.problems.map(attach));
-          skills = (await discover(dirname(r.root), '')).filter((s) => s.id === entry.skill_name);
+          skills = await secure((await discover(dirname(r.root), '')).filter((s) => s.id === entry.skill_name), entry, policy, config.cache.dir);
           const rec = await readState<{ checkedAt?: unknown }>(config.cache.dir, `http/${sha256(entry.url)}`);
           if (typeof rec?.checkedAt === 'number') cacheAgeSeconds = (ctx.now() - rec.checkedAt) / 1000;
         }
@@ -148,7 +188,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
     const genFile = generationFile(config.cache.dir);
     const stamps: Stamps = { configFile, config: configStamp, generationFile: genFile, generation: await generationStamp(genFile) };
     const res = await resolve(config, { force }, ctx);
-    const results = await Promise.all(res.registries.map((r) => loadOne(r, config, force)));
+    const results = await Promise.all(res.registries.map((r) => loadOne(r, config, force, res.policy)));
 
     const problems = [...res.problems, ...results.flatMap((r) => r.problems)];
     const stale = res.stale || results.some((r) => r.stale);
@@ -158,7 +198,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
         ...(r.reg.entry.type === 'github' ? { ref: r.reg.entry.ref } : {}),
         ...(r.sha !== undefined ? { sha: r.sha } : {}),
       })),
-      res.overrides, problems, stale,
+      res.overrides, problems, stale, res.policy,
     );
 
     const views: RegistryView[] = results.map((r) => {
@@ -195,7 +235,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
       const problems: Problem[] = [{ level: 'error', code: 'engine/load-failed', message: `loading the catalog failed unexpectedly: ${msg(e)}` }];
       let now = 0;
       try { now = ctx.now(); } catch { /* keep 0 */ }
-      return { catalog: new Catalog([], [], problems, false), views: [], includes: [], overrides: [], problems, expiresAt: now };
+      return { catalog: new Catalog([], [], problems, false, EMPTY_POLICY), views: [], includes: [], overrides: [], problems, expiresAt: now };
     }
   }
 
@@ -210,7 +250,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
     if (!l.stamps) return;
     const value = `${ctx.now()}-${process.pid}-${randomBytes(6).toString('hex')}\n`;
     try {
-      await writeAtomic(l.stamps.generationFile, value);
+      await writeCacheFile(l.stamps.generationFile, value);
       l.stamps.generation = value;
     } catch { /* unwritable cache: other processes reload on their own TTL */ }
   }

