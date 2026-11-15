@@ -163,6 +163,8 @@ class FileScan {
   private readonly stopped: Array<{ rule: Rule; after: number }> = [];
   private readonly chunks: Chunk[] = [];
   private readonly longLower = new Map<number, string>();
+  /** Per needle, per chunk: 0 not yet searched, 1 absent, 2 present. */
+  private readonly needleHits = new Map<string, Uint8Array>();
   private readonly readsPatterns: boolean;
 
   constructor(private readonly file: string, private readonly kind: FileKind, text: string) {
@@ -280,14 +282,29 @@ class FileScan {
   private *candidates(rule: Rule): Generator<number> {
     const pre = multiline.get(rule.id)!;
     const needles = rule.needles;
-    const has = (lower: string) => !needles || needles.some((n) => lower.includes(n));
-    for (const c of this.chunks) {
-      if ('long' in c) {
-        let lower = this.longLower.get(c.long);
-        if (lower === undefined) { lower = this.texts[c.long]!.toLowerCase(); this.longLower.set(c.long, lower); }
-        if (has(lower)) yield c.long;
-      } else if (has(c.lower) && pre.test(c.text)) for (let i = c.first; i <= c.last; i++) yield i;
+    for (let ci = 0; ci < this.chunks.length; ci++) {
+      const c = this.chunks[ci]!;
+      const has = !needles || needles.some((n) => this.hasNeedle(n, ci));
+      if ('long' in c) { if (has) yield c.long; }
+      else if (has && pre.test(c.text)) for (let i = c.first; i <= c.last; i++) yield i;
     }
+  }
+
+  /** Whether chunk ci holds the needle. Rules share needles, so each (needle, chunk) is searched once. */
+  private hasNeedle(n: string, ci: number): boolean {
+    let seen = this.needleHits.get(n);
+    if (!seen) { seen = new Uint8Array(this.chunks.length); this.needleHits.set(n, seen); }
+    if (seen[ci] === 0) {
+      const c = this.chunks[ci]!;
+      let lower: string;
+      if ('long' in c) {
+        const cached = this.longLower.get(c.long);
+        lower = cached ?? this.texts[c.long]!.toLowerCase();
+        if (cached === undefined) this.longLower.set(c.long, lower);
+      } else lower = c.lower;
+      seen[ci] = lower.includes(n) ? 2 : 1;
+    }
+    return seen[ci] === 2;
   }
 
   private finding(rule: Rule, text: string, line: number, m: { index: number; length: number }, spans: readonly Span[], frontmatter: boolean): Finding {

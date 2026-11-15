@@ -81,7 +81,8 @@ function caseless(src: string): string {
   const letter = (c: string | undefined) => c !== undefined && /[A-Za-z]/.test(c);
   for (let i = 0; i < src.length; i++) {
     const c = src[i]!;
-    if (src.startsWith(CAPS, i)) { out += CAPS; i += CAPS.length - 1; continue; }
+    const keep = [CAPS, ROOT_OPT].find((p) => src.startsWith(p, i));
+    if (keep) { out += keep; i += keep.length - 1; continue; }
     if (c === '\\') {
       const m = /^\\(?:k<\w+>|x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|[pP]\{[^}]*\}|c[A-Za-z]|[\s\S])/.exec(src.slice(i, i + 16))!;
       out += m[0];
@@ -100,7 +101,7 @@ function caseless(src: string): string {
   return out;
 }
 /** A rule regex. `ci` makes it case-insensitive everywhere except the ALL-CAPS class. */
-const build = (source: string, ci: boolean) => new RegExp((ci ? caseless(source) : source).split(CAPS).join(CAPS_SRC));
+const build = (source: string, ci: boolean) => new RegExp((ci ? caseless(source) : source).split(CAPS).join(CAPS_SRC).split(ROOT_OPT).join(ROOT_OPT_SRC));
 
 const DL = String.raw`\b(?:curl|wget)(?:\.exe)?\b`;
 /** A pipe (`|` or `|&`, not `||`). */
@@ -131,8 +132,14 @@ const INTERP = String.raw`(?:(?:ba|z|da|k)?sh|python[23]?|node|perl|ruby)`;
  * (json.load(sys.stdin), print(…)) is data. `-m` is data.
  */
 const RUNS_INPUT = String.raw`(?:exec|eval|compile|system|subprocess|spawn|popen|source|interact|repl|fileinput|runpy|\/dev\/(?:stdin|fd\/0)|\$\(\s*cat\b|\x60\s*cat\b|\b(?:ba|z|da|k)?sh\b|["'\s;&(]\.${H})`;
-/** A shell run as root with no command reads its commands from stdin: `sudo -s`, `sudo -i`, `sudo -Es`, `doas -s`. */
-const ROOT_SHELL = String.raw`(?:sudo|doas)(?=[^|\n;&]*?${H}(?:-[a-zA-Z]*[si]|--shell\b|--login\b))(?:\s+[^\s|;&)]+){1,16}?${H}*(?=$|[|;&)])`;
+/**
+ * A shell run as root with no command reads its commands from stdin (N7): `sudo`/`doas` followed only by options,
+ * one of them a lower-case `s` or `i` ending its option word (`-s`, `-i`, `-Es`, `-is`) or `--shell`/`--login`, up
+ * to the end of the segment. `-u USER` may carry its value. `sudo cpio -idmv` or `sudo docker load -i x` is not one.
+ */
+const ROOT_OPT = '\u0000ROOT\u0000';
+const ROOT_OPT_SRC = String.raw`-[A-Za-z]*[si]`;
+const ROOT_SHELL = String.raw`(?:sudo|doas)(?:\s+(?:-u\s+[^\s|;&)-]\S*|--user=\S+|-[A-Za-z]+|--[a-z-]+)){0,8}?\s+(?:${ROOT_OPT}|--shell|--login)(?:\s+-[A-Za-z]+){0,8}${H}*(?=$|[|;&)])`;
 /**
  * What a download can be piped into to run it: an interpreter (or su), after wrappers, by name or by any path,
  * optionally quoted; a root shell; or `xargs … sh -c` (the input becomes the code, whatever the -c code is). It
@@ -141,7 +148,7 @@ const ROOT_SHELL = String.raw`(?:sudo|doas)(?=[^|\n;&]*?${H}(?:-[a-zA-Z]*[si]|--
  * that ends its line also passes, so the block pre-test still finds a command wrapped onto the next line. More than
  * 64 wrapper words in a row hits the bound and fails closed (matches).
  */
-const SHELL = String.raw`(?=[^|\n]*?(?:sh|python|node|perl|ruby|su)|${H}*$)\s*(?:tee\b[^|\n]*?>\(\s*)?(?:${RUNNER}(?:${ROOT_SHELL}|["']?(?:[^\s/|"']*(?:\/[^\s/|"']+){0,32}\/)?(?:(?<=\bxargs\b[^|\n]{0,1024})(?:ba|z|da|k)?sh${H}+-\w*c\b|${INTERP}${H}+-\w*[cep]\b[^|\n]*?${RUNS_INPUT}|(?:ba|z|da|k)?sh\b(?!${H}+-c\b)|python[23]?\b(?!${H}+-[cm]\b)|node\b(?!${H}+-[ep]\b)|perl\b(?!${H}+-\w*e)|ruby\b(?!${H}+-e\b)|su\b(?!${H}+-c\b)|\$\{?SHELL\b))|(?:${RUNNER_WORD}\s+){65})`;
+const SHELL = String.raw`(?=[^|\n]*?(?:sh|python|node|perl|ruby|su|doas)|${H}*$)\s*(?:tee\b[^|\n]*?>\(\s*)?(?:${RUNNER}(?:${ROOT_SHELL}|["']?(?:[^\s/|"']*(?:\/[^\s/|"']+){0,32}\/)?(?:(?<=\bxargs\b[^|\n]{0,1024})(?:ba|z|da|k)?sh${H}+-\w*c\b|${INTERP}${H}+-\w*[cep]\b[^|\n]*?${RUNS_INPUT}|(?:ba|z|da|k)?sh\b(?!${H}+-c\b)|python[23]?\b(?!${H}+-[cm]\b)|node\b(?!${H}+-[ep]\b)|perl\b(?!${H}+-\w*e)|ruby\b(?!${H}+-e\b)|su\b(?!${H}+-c\b)|\$\{?SHELL\b))|(?:${RUNNER_WORD}\s+){65})`;
 const PS_DL = String.raw`\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|curl(?:\.exe)?|wget(?:\.exe)?)\b`;
 const IEX = String.raw`\b(?:iex|Invoke-Expression)\b`;
 const SUBST = String.raw`["']?(?:\$\(|\x60)\s*${DL}`; // "$(curl" or `curl

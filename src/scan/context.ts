@@ -46,13 +46,17 @@ export interface MatchSite {
   spans: readonly Span[];
   /** The line is inside the file's YAML frontmatter. */
   frontmatter: boolean;
-  /** The file reads a regex's text back (`.pattern`, `.source`): regex arguments don't downgrade (see readsPatterns). */
+  /** Regex arguments can't downgrade in this file (see readsPatterns). */
   readsPatterns: boolean;
 }
 
-/** Whether a script reads a compiled regex's text back (`P.pattern`, `re.source`), so its patterns may be code. */
+/**
+ * Whether regex arguments can't downgrade in this script: it reads a compiled regex's text back (`P.pattern`,
+ * `re.source`), so its patterns may be code; or it holds U+2028/U+2029, which end a JS line (N1) where this scan
+ * sees none.
+ */
 export function readsPatterns(text: string): boolean {
-  return /\.(?:pattern|source)\b/.test(text);
+  return /\.(?:pattern|source)\b|[\u2028\u2029]/.test(text);
 }
 
 const JS_FILE = /\.(?:js|mjs|cjs|ts)$/i;
@@ -81,39 +85,259 @@ export function quotedSpans(lines: string[], kind: FileKind, file: string): Map<
     });
     return spans;
   }
-  if (JS_FILE.test(file)) jsLineComments(lines, add);
-  else if (PY_FILE.test(file)) pyCommentsAndDocstrings(lines, add);
-  else hashLineComments(lines, file, add);
+  const lang = scriptLang(lines, file);
+  if (lang === 'js') jsLineComments(lines, add);
+  else if (lang === 'py') pyCommentsAndDocstrings(lines, add);
+  else if (lang === 'rbpl') rubyPerlComments(lines, add);
+  else if (lang === 'ps1') powershellComments(lines, add);
+  else shellComments(lines, file, add);
   return spans;
 }
 
-const PERL_RUBY = /\.(?:rb|pl)$/i;
-/** Ruby/Perl quote-like literals that may span lines: %q( %Q{ %w[ %( q{ qq( qw/ … */
-const QUOTE_LIKE = /%[qQwWiIrsx]?[({[<|!/]|(?<![\w$@%])q[qwrx]?\s*[({[<|!/]/;
+type Lang = 'js' | 'py' | 'rbpl' | 'ps1' | 'shell';
+/** The script's language for comment lexing: by extension, else by the `#!` line; anything else is shell. */
+function scriptLang(lines: string[], file: string): Lang {
+  if (JS_FILE.test(file)) return 'js';
+  if (PY_FILE.test(file)) return 'py';
+  if (/\.(?:rb|pl)$/i.test(file)) return 'rbpl';
+  if (/\.ps1$/i.test(file)) return 'ps1';
+  const bang = lines[0]?.startsWith('#!') ? lines[0] : '';
+  if (/python/.test(bang)) return 'py';
+  if (/\b(?:node|deno|bun)\b/.test(bang)) return 'js';
+  if (/\b(?:ruby|perl)/.test(bang)) return 'rbpl';
+  if (/\b(?:pwsh|powershell)/.test(bang)) return 'ps1';
+  return 'shell';
+}
+
+/** A `#` line that is a comment, unless it is the `#!` line. */
+const hashLine = (l: string, i: number) => /^\s*#/.test(l) && !(i === 0 && l.startsWith('#!'));
+
+type ShFrame = { k: 'sq' | 'ansi' | 'dq' | 'bq' | 'cmd' | 'param' | 'arith'; depth: number };
+type Heredoc = { word: string; strip: boolean };
+const HEREDOC_OP = /^<<(-?)[ \t]*\\?(["']?)([^\s'"<>|;&()]+)\2/;
+const WORD_BREAK = ' \t;&|()<>';
 
 /**
- * Shell, Ruby, Perl, PowerShell, Makefile and the like (P2-R12): a line whose first non-space character is `#`
- * (not a `#!` first line) is a comment, but only before the first other line that has an odd number of `'` or `"`
- * (a string that may continue on the next lines, `@"` here-strings included) or a heredoc operator `<<`, or in
- * Ruby/Perl a quote-like literal. After that line the lexer can't tell a comment from string or heredoc text that
- * the script may run, so no `#` line downgrades.
+ * Shell (sh/bash/zsh, extensionless scripts, Makefile, justfile, .envrc) whole-line comments (P2-R12, round 5). A
+ * per-line lexer carries its state across lines: '…' (no escapes), "…" and $'…' (with escapes), backticks, $( … ),
+ * $(( … )) and (( … )), ${ … }, and heredoc bodies (`<<[-]WORD` up to the WORD line). A `#` line is a comment only
+ * when the lexer is at top level at its start: not inside any of those, and not continued by a backslash. In a
+ * Makefile a `define` (a multi-line value whose `#` lines are text) ends all downgrades.
  */
-function hashLineComments(lines: string[], file: string, add: (i: number, s: Span) => void): void {
-  const quoteLike = PERL_RUBY.test(file);
+function shellComments(lines: string[], file: string, add: (i: number, s: Span) => void): void {
+  const make = /(?:^|\/)(?:[Mm]akefile|GNUmakefile)$/.test(file);
+  const stack: ShFrame[] = [];
+  const queued: Heredoc[] = [];
+  let body: Heredoc | undefined;
+  let continued = false;
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]!;
-    if (/^\s*#/.test(l)) {
-      if (!(i === 0 && l.startsWith('#!'))) add(i, WHOLE);
+    if (body) {
+      if ((body.strip ? l.replace(/^\t+/, '') : l) === body.word) body = queued.shift();
       continue;
     }
-    if (count(l, "'") % 2 === 1 || count(l, '"') % 2 === 1 || l.includes('<<') || (quoteLike && QUOTE_LIKE.test(l))) return;
+    if (make && /^\s*define\b/.test(l)) return;
+    if (stack.length === 0 && !continued && /^\s*#/.test(l)) {
+      if (hashLine(l, i)) add(i, WHOLE);
+      continue;
+    }
+    continued = shellLine(l, stack, queued);
+    if (queued.length) body = queued.shift();
   }
 }
 
-function count(l: string, c: string): number {
-  let n = 0;
-  for (let k = l.indexOf(c); k >= 0; k = l.indexOf(c, k + 1)) n++;
-  return n;
+// The characters each shell context reacts to; the lexer jumps from one to the next.
+const SH_STOP: Record<ShFrame['k'] | 'top', RegExp> = {
+  top: /[\\#'"`$(<]/g, cmd: /[\\#'"`$(<)]/g, sq: /'/g, ansi: /[\\']/g, dq: /[\\"`$]/g, bq: /[\\`'"$]/g,
+  param: /[\\'"`${}]/g, arith: /[\\'"`$()]/g,
+};
+
+/**
+ * A frame that `$` at k opens (`$(`, `$((`, `${`; in command context also `$'`, `$"`), pushed, and the length it
+ * takes; 0 if none.
+ */
+function shDollar(l: string, k: number, stack: ShFrame[], command: boolean): number {
+  const d = l[k + 1];
+  if (d === '(') {
+    if (l[k + 2] === '(') { stack.push({ k: 'arith', depth: 0 }); return 3; }
+    stack.push({ k: 'cmd', depth: 0 });
+    return 2;
+  }
+  if (d === '{') { stack.push({ k: 'param', depth: 0 }); return 2; }
+  if (command && d === "'") { stack.push({ k: 'ansi', depth: 0 }); return 2; }
+  if (command && d === '"') { stack.push({ k: 'dq', depth: 0 }); return 2; }
+  return 0;
+}
+
+const SH_OPEN: Record<string, ShFrame['k']> = { "'": 'sq', '"': 'dq', '`': 'bq' };
+
+/** Lexes one shell line, updating the frame stack and queuing heredocs. Returns whether a backslash continues it. */
+function shellLine(l: string, stack: ShFrame[], queued: Heredoc[]): boolean {
+  const n = l.length;
+  let k = 0;
+  while (k < n) {
+    const top = stack[stack.length - 1];
+    const stop = SH_STOP[top ? top.k : 'top'];
+    stop.lastIndex = k;
+    const m = stop.exec(l);
+    if (!m) return false;
+    k = m.index;
+    const c = m[0];
+    if (!top || top.k === 'cmd') {
+      if (c === '\\') { if (k === n - 1) return true; k += 2; continue; }
+      if (c === '#') {
+        if (k === 0 || WORD_BREAK.includes(l[k - 1]!)) return false; // a comment to the end of the line
+        k++;
+        continue;
+      }
+      if (c === '$') {
+        const skip = shDollar(l, k, stack, true);
+        k += skip || (l[k + 1] === '#' || l[k + 1] === '$' ? 2 : 1);
+        continue;
+      }
+      if (c === '(') {
+        if (l[k + 1] === '(') { stack.push({ k: 'arith', depth: 0 }); k += 2; continue; }
+        if (top) top.depth++;
+        k++;
+        continue;
+      }
+      if (c === ')') { if (top!.depth === 0) stack.pop(); else top!.depth--; k++; continue; }
+      if (c === '<') {
+        if (l[k + 1] !== '<') { k++; continue; }
+        if (l[k + 2] === '<') { k += 3; continue; }
+        const h = HEREDOC_OP.exec(l.slice(k, k + 256));
+        if (h) { queued.push({ word: h[3]!, strip: h[1] === '-' }); k += h[0].length; continue; }
+        k += 2;
+        continue;
+      }
+      stack.push({ k: SH_OPEN[c]!, depth: 0 });
+      k++;
+      continue;
+    }
+    if (c === '\\') { k += 2; continue; }
+    switch (top.k) {
+      case 'sq': case 'ansi':
+        stack.pop();
+        k++;
+        continue;
+      case 'dq':
+        if (c === '"') { stack.pop(); k++; continue; }
+        if (c === '`') { stack.push({ k: 'bq', depth: 0 }); k++; continue; }
+        k += shDollar(l, k, stack, false) || 1;
+        continue;
+      case 'bq':
+        if (c === '`') { stack.pop(); k++; continue; }
+        if (c === '$') { k += shDollar(l, k, stack, false) || 1; continue; }
+        stack.push({ k: SH_OPEN[c]!, depth: 0 });
+        k++;
+        continue;
+      default: { // param `${…}` and arithmetic `$((…))` / `((…))`
+        if (c === '$') { k += shDollar(l, k, stack, false) || 1; continue; }
+        if (c in SH_OPEN) { stack.push({ k: SH_OPEN[c]!, depth: 0 }); k++; continue; }
+        if (c === '{' || c === '(') top.depth++;
+        else if (top.depth > 0) top.depth--;
+        else if (top.k === 'param') stack.pop();
+        else if (l[k + 1] === ')') { stack.pop(); k++; }
+        k++;
+        continue;
+      }
+    }
+  }
+  return false;
+}
+
+/** Ruby/Perl sections that the script can read back as text: `__END__` / `__DATA__` and the DATA handle. */
+const RB_PL_DATA = /\b(?:__END__|__DATA__|DATA)\b/;
+/** Perl quote-like operators (and Ruby calls of those names): a name followed by a delimiter. */
+const PERL_QUOTE_OP = /^(?:q|qq|qw|qr|qx|m|s|tr|y)\s*[^\w\s,;=)}\]]/;
+
+/**
+ * Ruby and Perl whole-line comments. Their strings, regex literals and quote-like operators can't be lexed cheaply,
+ * so `#` lines count only before the first line this lexer can't follow, and none count in a file with a DATA
+ * section. A code line is followed only if, outside '…' and "…" (both with backslash escapes), it has no `/`, `%`,
+ * backtick, `<<`, `?` before a quote, quote-like operator, or `#{`/`${`/`@{` inside "…", and no string is open at its
+ * end. A line ending in a backslash continues into the next, which is then never a comment.
+ */
+function rubyPerlComments(lines: string[], add: (i: number, s: Span) => void): void {
+  if (lines.some((l) => RB_PL_DATA.test(l))) return;
+  let continued = false;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]!;
+    if (!continued && /^\s*#/.test(l)) { if (hashLine(l, i)) add(i, WHOLE); continue; }
+    const r = rubyPerlLine(l);
+    if (r === 'lost') return;
+    continued = r === 'continued';
+  }
+}
+
+function rubyPerlLine(l: string): 'ok' | 'continued' | 'lost' {
+  for (let k = 0; k < l.length; k++) {
+    const c = l[k]!;
+    if (c === '#') return 'ok';
+    if (c === '\\') { if (k === l.length - 1) return 'continued'; k++; continue; }
+    if (c === '"' || c === "'") {
+      let j = k + 1;
+      for (; j < l.length && l[j] !== c; j++) {
+        if (l[j] === '\\') j++;
+        else if (c === '"' && (l[j] === '#' || l[j] === '$' || l[j] === '@') && l[j + 1] === '{') return 'lost';
+      }
+      if (j >= l.length) return 'lost';
+      k = j;
+      continue;
+    }
+    if (c === '/' || c === '%' || c === '`') return 'lost';
+    if (c === '<' && l[k + 1] === '<') return 'lost';
+    if (c === '?' && (l[k + 1] === '"' || l[k + 1] === "'")) return 'lost';
+    if (/[a-z]/.test(c) && (k === 0 || !/[\w$@%:>.]/.test(l[k - 1]!)) && PERL_QUOTE_OP.test(l.slice(k, k + 8))) return 'lost';
+  }
+  return 'ok';
+}
+
+/**
+ * PowerShell whole-line comments (N4). `#` lines count only before the first line this lexer can't follow: a `<#`
+ * block comment opener outside a string, a here-string (`@"`/`@'`), a `$(` inside "…", or a string still open at the
+ * end of a line ('…' has no escapes, "…" escapes with a backtick). A `#` line holding `#>` (a block comment's end)
+ * is never a comment. A line ending in a backtick continues into the next, which is then never a comment.
+ */
+function powershellComments(lines: string[], add: (i: number, s: Span) => void): void {
+  let continued = false;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]!;
+    if (l.includes('<#')) return;
+    if (!continued && /^\s*#/.test(l)) {
+      if (l.includes('#>')) return;
+      if (hashLine(l, i)) add(i, WHOLE);
+      continue;
+    }
+    const r = powershellLine(l);
+    if (r === 'lost') return;
+    continued = r === 'continued';
+  }
+}
+
+function powershellLine(l: string): 'ok' | 'continued' | 'lost' {
+  for (let k = 0; k < l.length; k++) {
+    const c = l[k]!;
+    if (c === '#') return 'ok';
+    if (c === '`') { if (k === l.length - 1) return 'continued'; k++; continue; }
+    if (c === '@' && (l[k + 1] === '"' || l[k + 1] === "'")) return 'lost';
+    if (c === "'") {
+      const end = l.indexOf("'", k + 1);
+      if (end < 0) return 'lost';
+      k = end;
+      continue;
+    }
+    if (c === '"') {
+      let j = k + 1;
+      for (; j < l.length && l[j] !== '"'; j++) {
+        if (l[j] === '`') j++;
+        else if (l[j] === '$' && l[j + 1] === '(') return 'lost';
+      }
+      if (j >= l.length) return 'lost';
+      k = j;
+    }
+  }
+  return 'ok';
 }
 
 /** Index of `q` (a quote or triple quote) in `l` at or after `k`, skipping backslash escapes; -1 if none. */
@@ -133,6 +357,8 @@ function closingQuote(l: string, k: number, q: string): number {
  * continuation). An unclosed block comment quotes nothing.
  */
 function jsLineComments(lines: string[], add: (i: number, s: Span) => void): void {
+  // U+2028 and U+2029 end a JS line (a `//` comment, a string continuation) but not a line here (N1).
+  if (lines.some((l) => /[\u2028\u2029]/.test(l))) return;
   let block: Array<[number, Span]> | undefined;
   let lost = false;
   lines.forEach((l, i) => {
@@ -223,7 +449,7 @@ function pyCommentsAndDocstrings(lines: string[], add: (i: number, s: Span) => v
       if (c === '"' || c === "'") {
         const q = l.startsWith(c.repeat(3), k) ? c.repeat(3) : c;
         const prefix = pyPrefix(l, k);
-        const f = /[fF]/.test(prefix);
+        const f = /[fFtT]/.test(prefix); // f-strings and t-strings (3.14) both interpolate
         const first = l.slice(0, k - prefix.length).trim() === '';
         str = { q, f, doc: q.length === 3 && !f && statementStart && first && expectDoc, line: i, at: k + q.length, pending: [] };
         expectDoc = false;
@@ -250,7 +476,7 @@ const DOC_READ = /__doc__|getdoc|getattr|\bglobals\(|\blocals\(|\bvars\(|__dict_
 /** The string prefix before the quote at k: the whole identifier run before it, if that is 1–2 prefix letters. */
 function pyPrefix(l: string, k: number): string {
   const run = /\w{0,3}$/.exec(l.slice(Math.max(0, k - 3), k))![0];
-  return /^[rRbBuUfF]{1,2}$/.test(run) ? run : '';
+  return /^[rRbBuUfFtT]{1,2}$/.test(run) ? run : '';
 }
 
 /** Index of the current string's closing quote on this line, or -1. In f-strings, quotes inside braces are nested strings. */
@@ -363,7 +589,7 @@ function directStringArgument(text: string, open: number, from: number, to: numb
   for (let k = open; k < text.length && k < from; k++) {
     const c = text[k]!;
     if (c === '"' || c === "'" || c === '`') {
-      if (py && (/[fF]/.test(pyPrefix(text, k)) || (/\w/.test(text[k - 1] ?? '') && pyPrefix(text, k) === ''))) return false;
+      if (py && (/[fFtT]/.test(pyPrefix(text, k)) || (/\w/.test(text[k - 1] ?? '') && pyPrefix(text, k) === ''))) return false;
       if (!py && c === '`' && /[\w$)\].]\s*$/.test(text.slice(Math.max(0, k - 64), k))) return false;
       const end = closingQuote(text, k + 1, c);
       if (end < 0) return false;
@@ -420,31 +646,42 @@ function localOnly(site: MatchSite): boolean {
   return true;
 }
 
-const CLIENT_CALL = /\b(?:(?:requests|httpx)\.\w+|urlopen|axios(?:\.\w+)?)\s*\(|(?:\$|\b)\w*fetch\w*\s*\(/gi;
+// `fetch\w*` anywhere in a word: fetch, nodeFetch, $fetch, ofetch, fetchJSON (no `\w*` before it: that backtracks).
+const CLIENT_CALL = /\b(?:(?:requests|httpx)\.\w+|urlopen|axios(?:\.\w+)?)\s*\(|fetch\w*\s*\(/gi;
 
 /** Options that can send the request elsewhere, or arguments that can carry them unseen (`**kw`, `...opts`). */
 const PROGRAM_REROUTE = /[pP][rR][oO][xX]|\*\*|\.\.\.|\b(?:dispatcher|agent|httpAgent|httpsAgent|transport|mounts|adapter|baseURL|base_url|socketPath|lookup|opener)\b/;
-/** Interpolated strings: a JS template holding `${`, a Python f-string (any prefix with f). */
-const INTERPOLATED = /\$\{|(?<![\w$])[rRbBuU]?[fF][rRbBuU]?["']/;
+
+/** The only option keys (object keys, Python keyword arguments) a localhost call may set (N5). */
+const OPTION_KEYS = new Set(['body', 'json', 'data', 'headers', 'method', 'timeout']);
+const QUOTED_NAME = String.raw`(?:"[\w-]*"|'[\w-]*')`;
+/** A read of the environment: `process.env.X`, `os.environ["X"]`, `os.getenv("X")`, `os.environ.get("X")`. */
+const ENV_MEMBER = new RegExp(String.raw`^(?:(?:process\.env|os\.environ)(?:\.[A-Za-z_]\w*|\[\s*${QUOTED_NAME}\s*\])*|os\.(?:getenv|environ\.get)\(\s*${QUOTED_NAME}\s*\))$`);
+const SIMPLE = /^(?:-?\d+(?:\.\d+)?|true|false|null|None|True|False)$/;
+const ENTRY = /^(?:([A-Za-z_$][\w$]*)|"([\w -]*)"|'([\w -]*)')\s*:\s*([\s\S]+)$/;
 
 /**
- * Python/JS (P2-R13): every client call's first argument is exactly a non-interpolated loopback string literal (or,
- * for a keyword-first call, its `url=` is); every later positional argument is a string, an object literal or
- * carries the environment (the data); no option on the line can reroute the request; and every `url=`/`url:` is
- * exactly a loopback literal.
+ * Python/JS (P2-R13, N5, N6): every client call's first argument is exactly a non-interpolated loopback string
+ * literal (or, for a keyword-first call, its `url=` is). Every later argument is on an allow-list: a literal, an
+ * environment read, `JSON.stringify`/`json.dumps`/`dict` of one, or an object/dict literal whose keys are plain
+ * names (no computed `[k]`, shorthand or spread) from OPTION_KEYS with allow-listed values; Python keyword arguments
+ * likewise. No `\u`/`\x` escape may appear on the line (they can spell a key), no option can reroute the request,
+ * and every `url=`/`url:` is exactly a loopback literal.
  */
 function programLocalOnly(s: string): boolean {
-  if (PROGRAM_REROUTE.test(s) || INTERPOLATED.test(s)) return false;
+  // Interpolated strings: `${` here; f-/t-strings in the arguments make callArgs fail, and literalEnd (url=) refuses them.
+  if (s.includes('${') || /\\[ux]/.test(s) || PROGRAM_REROUTE.test(s)) return false;
   const calls = [...s.matchAll(CLIENT_CALL)];
   // Each call's arguments are split by a scan to its closing paren; nested calls would make that quadratic.
   if (calls.length === 0 || calls.length > 16) return false;
-  const keyword = (a: string) => /^\w+\s*=(?!=)/.test(a);
   for (const m of calls) {
     const args = callArgs(s, m.index! + m[0].length);
     if (!args || args.length === 0) return false;
-    if (keyword(args[0]!) ? !args.some((a) => /^url\s*=/.test(a)) : !isLiteral(args[0]!, true)) return false;
-    for (const a of args.slice(1)) {
-      if (keyword(a) || a.startsWith('{') || isLiteral(a, false) || /os\.environ|os\.getenv|process\.env/.test(a)) continue;
+    const kw = args.map((a) => /^(\w+)\s*=(?!=)\s*([\s\S]*)$/.exec(a));
+    if (kw[0] ? !kw.some((k) => k?.[1] === 'url') : !isLiteral(args[0]!, true)) return false;
+    for (let n = kw[0] ? 0 : 1; n < args.length; n++) {
+      const k = kw[n];
+      if (k ? (k[1] === 'url' ? isLiteral(k[2]!, true) : OPTION_KEYS.has(k[1]!) && safeValue(k[2]!, 0)) : args[n] === '' || safeValue(args[n]!, 0, true)) continue;
       return false;
     }
   }
@@ -455,7 +692,55 @@ function programLocalOnly(s: string): boolean {
   });
 }
 
-/** The arguments (trimmed) of the call whose `(` ends just before `from`, split at its top-level commas. */
+/** An allow-listed argument value. A top-level object literal is an options object (`options`): its keys must be OPTION_KEYS. */
+function safeValue(v: string, depth: number, options = false): boolean {
+  v = v.trim();
+  if (isLiteral(v, false) || SIMPLE.test(v) || ENV_MEMBER.test(v)) return true;
+  if (depth > 4) return false;
+  if (v.startsWith('{')) return safeObject(v, options, depth + 1);
+  const call = /^(?:JSON\.stringify|json\.dumps|dict)\(([\s\S]*)\)$/.exec(v);
+  if (!call) return false;
+  const inner = splitTop(call[1]!);
+  return inner !== undefined && inner.length === 1 && (ENV_MEMBER.test(inner[0]!) || (inner[0]!.startsWith('{') && safeObject(inner[0]!, false, depth + 1)));
+}
+
+function safeObject(v: string, options: boolean, depth: number): boolean {
+  if (!v.endsWith('}')) return false;
+  const entries = splitTop(v.slice(1, -1));
+  if (!entries) return false;
+  return entries.every((e, n) => {
+    if (e === '') return n === entries.length - 1; // a trailing comma
+    const m = ENTRY.exec(e);
+    if (!m) return false;
+    if (options && !OPTION_KEYS.has(m[1] ?? m[2] ?? m[3]!)) return false;
+    return safeValue(m[4]!, depth);
+  });
+}
+
+/** `s` split (trimmed) at its top-level commas; undefined if a bracket or string is unbalanced. */
+function splitTop(s: string): string[] | undefined {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let k = 0; k < s.length; k++) {
+    const c = s[k]!;
+    if (c === '"' || c === "'" || c === '`') {
+      const end = closingQuote(s, k + 1, c);
+      if (end < 0) return undefined;
+      k = end;
+    } else if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') { if (--depth < 0) return undefined; }
+    else if (c === ',' && depth === 0) { parts.push(s.slice(start, k).trim()); start = k + 1; }
+  }
+  if (depth !== 0) return undefined;
+  parts.push(s.slice(start).trim());
+  return parts;
+}
+
+/**
+ * The arguments (trimmed) of the call whose `(` ends just before `from`, split at its top-level commas; undefined if
+ * unbalanced or if an argument holds a Python f- or t-string (interpolated).
+ */
 function callArgs(s: string, from: number): string[] | undefined {
   const args: string[] = [];
   let depth = 0;
@@ -463,6 +748,7 @@ function callArgs(s: string, from: number): string[] | undefined {
   for (let k = from; k < s.length; k++) {
     const c = s[k]!;
     if (c === '"' || c === "'" || c === '`') {
+      if (/[fFtT]/.test(pyPrefix(s, k))) return undefined;
       const end = closingQuote(s, k + 1, c);
       if (end < 0) return undefined;
       k = end;
