@@ -662,3 +662,5 @@ It's installed with a marker whose `id: "skillseekr"` and `registry: "builtin"`,
   - The starter skill marker uses `registry: "builtin"`.
   - Search weights are name ×3, ID ×2, description ×1.
   - `instructions` is surfaced in `list_registries` and `RegistryView` only, not in the server instructions, so included files can't inject text into every session.
+
+> **Superseded (2026-11-15):** the Node floor is now 22.12 (Node 20 is end-of-life) and the repo uses pnpm. See package.json `engines` / `packageManager` and .github/workflows/ci.yml.

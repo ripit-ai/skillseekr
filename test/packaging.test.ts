@@ -9,7 +9,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (p: string) => readFile(join(root, p));
 const json = async (p: string) => JSON.parse((await read(p)).toString('utf8')) as Record<string, any>;
 const run = promisify(execFile);
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 
 describe('Claude Code plugin', () => {
   it('plugin starter skill is byte-identical to assets/starter-skill/SKILL.md', async () => {
@@ -47,16 +47,18 @@ describe('Claude Code plugin', () => {
   });
 });
 
-describe('npm package', () => {
+describe('published package', () => {
   let files: string[] = [];
 
   beforeAll(async () => {
     // dist/ is built by the vitest globalSetup. --ignore-scripts keeps lifecycle output out of the JSON.
-    const { stdout } = await run(npm, ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: root });
-    files = (JSON.parse(stdout) as Array<{ files: Array<{ path: string }> }>)[0]!.files.map((f) => f.path);
+    const { stdout } = await run(pnpm, ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: root });
+    // pnpm prints one object; npm prints a one-element array. Accept either.
+    const parsed = JSON.parse(stdout) as { files: Array<{ path: string }> } | Array<{ files: Array<{ path: string }> }>;
+    files = (Array.isArray(parsed) ? parsed[0]! : parsed).files.map((f) => f.path);
   }, 180_000);
 
-  it('npm pack --dry-run --json includes dist/cli/main.js, assets/, plugins/, .claude-plugin/', () => {
+  it('pnpm pack --dry-run --json includes dist/cli/main.js, assets/, plugins/, .claude-plugin/', () => {
     expect(files).toContain('dist/cli/main.js');
     expect(files).toContain('assets/starter-skill/SKILL.md');
     expect(files).toContain('plugins/skillseekr/.claude-plugin/plugin.json');
@@ -66,7 +68,7 @@ describe('npm package', () => {
     expect(files).toContain('THIRD_PARTY_NOTICES.md'); // skillyard's MIT notice ships with the ported code in dist/
   });
 
-  it('npm pack leaves out tests, sources and .superpowers', () => {
+  it('pnpm pack leaves out tests, sources and .superpowers', () => {
     expect(files.filter((f) => /^(test|src|\.superpowers|docs)\//.test(f))).toEqual([]);
   });
 });
