@@ -4,7 +4,7 @@
  * and then fetch the right skill with `get_skill`? Ten prompts (prompts.json), each matching one
  * skill under skills/. Pass mark: 8 of 10 per tool.
  *
- * Not part of `npm test`. It starts real agents (and spends tokens), so run it by hand:
+ * Not part of `pnpm test`. It starts real agents (and spends tokens), so run it by hand:
  *
  *   node evals/discovery/run.mjs --dry-run                 # validate prompts.json against skills/
  *   node evals/discovery/run.mjs --tool claude|opencode|copilot [--only <n>] [--timeout <seconds>]

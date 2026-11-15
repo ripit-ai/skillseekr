@@ -8,7 +8,7 @@ This README is for developers who install and use skillseekr, and for registry o
 
 ## Install
 
-Requires Node 20 or later.
+Requires Node 22.12 or later.
 
 ```sh
 npm i -g github:ripit-ai/skillseekr
@@ -17,6 +17,8 @@ volta install github:ripit-ai/skillseekr
 ```
 
 Installing from GitHub runs the `prepare` script (`tsc`), so it builds `dist/` on your machine.
+
+> **pnpm:** `pnpm add -g github:ripit-ai/skillseekr` refuses to run a git-hosted package's build script unless that exact tarball is listed in `allowBuilds`, and the entry changes with every commit. Use npm or Volta for the global install until the package is published to a registry.
 
 > **npm name:** the package is not published to npm yet. The npm name `skillseekr` should be registered as a placeholder so nobody else takes it. Until then, install from GitHub as above.
 
@@ -212,9 +214,11 @@ A registries file is a JSONC file with a `registries` object in the format above
 
 ## Development
 
+This repo uses pnpm (the version is pinned in `package.json` `packageManager`; `corepack enable` or Volta will pick it up).
+
 ```sh
-npm install
-npm run build   # tsc -> dist/
-npm test
-npm run lint
+pnpm install
+pnpm run build   # tsc -> dist/
+pnpm test
+pnpm run lint
 ```

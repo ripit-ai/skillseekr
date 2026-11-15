@@ -5,7 +5,7 @@ For whoever signs off Phase 1. Each criterion from [spec.md](spec.md) ("Acceptan
 Run the automated part first:
 
 ```sh
-npm run lint && npm test
+pnpm run lint && pnpm test
 ```
 
 Expected: no type errors, every test file passes, no warnings in the output. `test/e2e/stdio.test.ts` runs the built `dist/cli/main.js` (it builds first if `dist/` is missing).
@@ -71,7 +71,7 @@ Automated, partial. `test/e2e/stdio.test.ts` > "search → get → read_skill_fi
 
 Manual, by eval harness. See the header of `evals/discovery/run.mjs` for the full wiring. Short version:
 
-1. Manual: check the set is consistent (offline, free) with `node evals/discovery/run.mjs --dry-run`. Expected: `ok: 10 prompts, 10 skills, every expectedId exists`. `npm test` runs only the `validatePrompts` function, not the `--dry-run` command: `test/evals/discovery.test.ts` > "prompts.json is valid: 10 prompts, every expectedId is a skill, none names its skill".
+1. Manual: check the set is consistent (offline, free) with `node evals/discovery/run.mjs --dry-run`. Expected: `ok: 10 prompts, 10 skills, every expectedId exists`. `pnpm test` runs only the `validatePrompts` function, not the `--dry-run` command: `test/evals/discovery.test.ts` > "prompts.json is valid: 10 prompts, every expectedId is a skill, none names its skill".
 2. Publish `evals/discovery/skills` where the registry file points (ripit-ai/skillseekr, `main`, or edit `evals/discovery/registry/registries.jsonc` for your fork). Write an eval-only config that includes `evals/discovery/registry/registries.jsonc` via a `github-registry` entry, and run `skillseekr setup` so every tool has the server.
 3. For each tool, using that config (default models, no other skills installed):
 
