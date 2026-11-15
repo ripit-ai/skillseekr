@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { addRegistry, removeRegistry, defaultConfigText } from '../../src/config/edit.js';
+import { parse } from 'jsonc-parser';
+import { addBlock, addRegistry, removeAllow, removeBlock, removeRegistry, setAllow, setTrust, defaultConfigText } from '../../src/config/edit.js';
 import { parseRegistriesFile } from '../../src/config/load.js';
 
 const opts = { file: 'f', isLocalConfig: true };
@@ -78,5 +79,56 @@ describe('defaultConfigText', () => {
   it('uses owner/repo as description for other names', () => {
     const f = parseRegistriesFile(defaultConfigText({ owner: 'acme', repo: 'skills', name: 'acme' }), opts);
     expect(f.registries[0]![1]).toMatchObject({ description: 'acme/skills' });
+  });
+});
+
+describe('policy edit helpers', () => {
+  const doc = `{
+  // keep me
+  "registries": {}, // regs
+  "block": [
+    { "id": "x/y", "reason": "r", "added": "2026-01-01" } // first
+  ]
+}`;
+  const H = `sha256:${'a'.repeat(64)}`;
+  const parsed = (t: string) => parse(t, [], { allowTrailingComma: true });
+
+  it('addBlock appends keeping comments, creates the array, and refuses duplicates', () => {
+    const out = addBlock(doc, { content_hash: H, reason: 'bad', added: '2026-11-14' });
+    expect(out).toContain('// keep me');
+    expect(out).toContain('// first');
+    expect(parsed(out).block).toHaveLength(2);
+    expect(() => addBlock(out, { content_hash: H, reason: 'again', added: 'd' })).toThrow('already blocked');
+    expect(() => addBlock(doc, { id: 'x/y', reason: 'again', added: 'd' })).toThrow('already blocked');
+    expect(parsed(addBlock('{ "registries": {} }', { id: 'n', reason: 'r', added: 'd' })).block).toEqual([{ id: 'n', reason: 'r', added: 'd' }]);
+  });
+
+  it('removeBlock removes by id or hash, keeps comments, and throws when absent', () => {
+    const two = addBlock(doc, { content_hash: H, reason: 'bad', added: '2026-11-14' });
+    const noId = removeBlock(two, { id: 'x/y' });
+    expect(parsed(noId).block).toEqual([{ content_hash: H, reason: 'bad', added: '2026-11-14' }]);
+    expect(noId).toContain('// keep me');
+    expect(parsed(removeBlock(two, { content_hash: H })).block).toHaveLength(1);
+    expect(() => removeBlock(doc, { id: 'nope' })).toThrow('not blocked');
+  });
+
+  it('setAllow adds then replaces idempotently; removeAllow removes and throws when absent', () => {
+    const e = { content_hash: H, rules: ['a/b'], reason: 'r', added: 'd' };
+    const once = setAllow(doc, 'a/b-skill', e);
+    expect(setAllow(once, 'a/b-skill', e)).toBe(once);
+    expect(parsed(setAllow(once, 'a/b-skill', { ...e, reason: 'new' })).allow['a/b-skill'].reason).toBe('new');
+    expect(once).toContain('// keep me');
+    const gone = removeAllow(once, 'a/b-skill');
+    expect(parsed(gone).allow).toEqual({});
+    expect(() => removeAllow(gone, 'a/b-skill')).toThrow('no allow entry');
+  });
+
+  it('setTrust appends and replaces an owner case-insensitively', () => {
+    const k1 = `ed25519:${'A'.repeat(43)}`; const k2 = `ed25519:${'B'.repeat(43)}`;
+    const one = setTrust(doc, 'Acme', [k1]);
+    expect(parsed(one).trust).toEqual([{ owner: 'Acme', public_keys: [k1] }]);
+    const two = setTrust(one, 'acme', [k1, k2]);
+    expect(parsed(two).trust).toEqual([{ owner: 'acme', public_keys: [k1, k2] }]);
+    expect(two).toContain('// keep me');
   });
 });

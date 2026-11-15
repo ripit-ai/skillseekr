@@ -13,7 +13,8 @@ export function registerSearch(program: Command, cli: Cli): void {
       if (hits.length === 0) return cli.io.out('no matching skills\n');
       cli.io.out(table(hits.map((h) => {
         const notes = h.overrode.map((o) => ` [${overrodeText(o)}]`).join('');
-        return [h.id, h.registry, viaText(h.via), h.description.replace(/\s+/g, ' ') + notes];
+        const labels = (h.security.warnings > 0 ? ` [warnings: ${h.security.warnings}]` : '') + (h.security.allowedBy ? ` [allowed by ${h.security.allowedBy}]` : '');
+        return [h.id, h.registry, viaText(h.via), h.description.replace(/\s+/g, ' ') + notes + labels];
       })));
     });
 }

@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { Command, CommanderError } from 'commander';
 import { defaultContext, type Ctx } from '../context.js';
 import { createEngine, type Engine } from '../engine.js';
+import { registerAllow } from './commands/allow.js';
+import { registerBlock } from './commands/block.js';
 import { registerInstall } from './commands/install.js';
 import { registerKeys } from './commands/keys.js';
 import { registerList } from './commands/list.js';
@@ -28,7 +30,7 @@ export type { Io } from './output.js';
 /** Command registrars, in help order. */
 export const commands: Array<(program: Command, cli: Cli) => void> = [
   registerSetup, registerSearch, registerShow, registerInstall, registerRemove, registerList, registerOutdated,
-  registerUpdate, registerRegistries, registerSync, registerDoctor, registerValidate, registerKeys, registerSign, registerMcp,
+  registerUpdate, registerBlock, registerAllow, registerRegistries, registerSync, registerDoctor, registerValidate, registerKeys, registerSign, registerMcp,
 ];
 
 function version(): string {

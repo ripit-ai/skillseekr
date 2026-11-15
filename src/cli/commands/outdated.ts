@@ -1,5 +1,5 @@
 import type { Command } from 'commander';
-import { installedRows, installedTable } from './list.js';
+import { installedRows, installedTable, publicRows, reportBlockedCopies } from './list.js';
 import { isJson, loadCatalog, printJson, type Cli } from '../output.js';
 
 export function registerOutdated(program: Command, cli: Cli): void {
@@ -8,7 +8,8 @@ export function registerOutdated(program: Command, cli: Cli): void {
     .action(async (opts: { user?: boolean }, cmd: Command) => {
       const catalog = await loadCatalog(cli);
       const rows = (await installedRows(cli, catalog, opts.user)).filter((r) => r.status !== 'current');
-      if (isJson(cmd)) return printJson(cli.io, { outdated: rows, stale: catalog.stale });
+      reportBlockedCopies(cli, rows);
+      if (isJson(cmd)) return printJson(cli.io, { outdated: publicRows(rows), stale: catalog.stale });
       cli.io.out(rows.length ? installedTable(rows) : 'everything is up to date\n');
     });
 }

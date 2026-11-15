@@ -43,7 +43,7 @@ function buildEntry(o: AddOpts): Record<string, unknown> {
 }
 
 /** The shared atomic writer, with a refused (dangling symlink) target reported as a user error. */
-async function writeAtomic(file: string, data: string): Promise<void> {
+export async function writeAtomic(file: string, data: string): Promise<void> {
   try {
     await writeFileAtomic(file, data);
   } catch (e) {
@@ -52,7 +52,7 @@ async function writeAtomic(file: string, data: string): Promise<void> {
   }
 }
 
-async function readConfigText(file: string, missing: string | undefined): Promise<string> {
+export async function readConfigText(file: string, missing: string | undefined): Promise<string> {
   try {
     return await readFile(file, 'utf8');
   } catch (e) {

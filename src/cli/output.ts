@@ -3,6 +3,7 @@ import type { Catalog } from '../catalog/catalog.js';
 import type { Ctx } from '../context.js';
 import type { Engine } from '../engine.js';
 import type { Problem } from '../types.js';
+import type { Finding } from '../scan/scan.js';
 
 export interface Io {
   out(s: string): void; err(s: string): void;
@@ -79,3 +80,7 @@ export function lookupOrThrow(catalog: Catalog, idOrName: string) {
   const hits = catalog.search(idOrName, 3).map((h) => h.id);
   throw new CliError(`skill "${idOrName}" not found${hits.length ? `; did you mean: ${hits.join(', ')}` : ''}`);
 }
+
+/** `file:line rule message (downgraded reason)`: one finding, as shown by `show` and `allow`. */
+export const findingLine = (f: Finding): string =>
+  `${f.file}:${f.line} ${f.rule} ${f.message}${f.downgraded ? ` (${f.downgraded})` : ''}`;
