@@ -7,7 +7,7 @@ import { isAbsolute, join } from 'node:path';
 import { parseFrontmatter } from '../catalog/frontmatter.js';
 import { MAX_FILE_BYTES, MAX_SCAN_BYTES, SNIFF_BYTES } from '../catalog/limits.js';
 import { RULES, TOOL_KEYS, ruleMatch, ruleTest, toolGrants, type Rule } from './rules.js';
-import { downgradeReason, quotedSpans, type FileKind, type Span } from './context.js';
+import { downgradeReason, quotedSpans, readsPatterns, type FileKind, type Span } from './context.js';
 
 export interface Finding { rule: string; severity: 'critical' | 'warning'; file: string; line: number; message: string; downgraded?: string /* reason */ }
 export interface ScanResult { findings: Finding[]; critical: number; warning: number }
@@ -163,9 +163,11 @@ class FileScan {
   private readonly stopped: Array<{ rule: Rule; after: number }> = [];
   private readonly chunks: Chunk[] = [];
   private readonly longLower = new Map<number, string>();
+  private readonly readsPatterns: boolean;
 
   constructor(private readonly file: string, private readonly kind: FileKind, text: string) {
     this.physical = text.split('\n');
+    this.readsPatterns = kind === 'script' && readsPatterns(text);
     const spans = quotedSpans(this.physical, kind, file);
     ({ end: this.fmEnd, data: this.fmData } = kind === 'text' && /\.md$/i.test(file) ? frontmatter(this.physical) : { end: -1, data: undefined });
     const joinable = kind === 'script' && !/\.(?:js|mjs|cjs|ts)$/i.test(file);
@@ -289,7 +291,7 @@ class FileScan {
   }
 
   private finding(rule: Rule, text: string, line: number, m: { index: number; length: number }, spans: readonly Span[], frontmatter: boolean): Finding {
-    const reason = downgradeReason(rule, { kind: this.kind, file: this.file, text, index: m.index, length: m.length, spans, frontmatter });
+    const reason = downgradeReason(rule, { kind: this.kind, file: this.file, text, index: m.index, length: m.length, spans, frontmatter, readsPatterns: this.readsPatterns });
     const f: Finding = { rule: rule.id, severity: reason ? 'warning' : rule.severity, file: this.file, line: line + 1, message: rule.message };
     if (reason) f.downgraded = reason;
     return f;

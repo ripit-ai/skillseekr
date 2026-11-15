@@ -69,34 +69,79 @@ function lineLocal(src: string): string {
 const firstThen = (n: string, a: string, rest: string) => `^(?=(?<pre${n}>[^\\n]*?)${lineLocal(a)})\\k<pre${n}>(?<hit${n}>${a}${rest})`;
 const H = String.raw`[^\S\n]`; // horizontal whitespace, for lookarounds
 
+/**
+ * The source with every ASCII letter made caseless (`a` → `[aA]`, `[a-z]` → `[a-zA-Z]`), like the `i` flag, except
+ * the CAPS placeholder, which `build` then replaces with the case-sensitive ALL-CAPS class. Escapes (`\s`, `\x60`,
+ * `\k<name>`) and group names are copied unchanged.
+ */
+function caseless(src: string): string {
+  let out = '';
+  let inClass = false;
+  const other = (c: string) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase());
+  const letter = (c: string | undefined) => c !== undefined && /[A-Za-z]/.test(c);
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!;
+    if (src.startsWith(CAPS, i)) { out += CAPS; i += CAPS.length - 1; continue; }
+    if (c === '\\') {
+      const m = /^\\(?:k<\w+>|x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|[pP]\{[^}]*\}|c[A-Za-z]|[\s\S])/.exec(src.slice(i, i + 16))!;
+      out += m[0];
+      i += m[0].length - 1;
+    } else if (!inClass && src.startsWith('(?<', i) && /\w/.test(src[i + 3] ?? '')) {
+      const end = src.indexOf('>', i);
+      out += src.slice(i, end + 1);
+      i = end;
+    } else if (inClass) {
+      if (c === ']') { inClass = false; out += c; }
+      else if (letter(c) && src[i + 1] === '-' && letter(src[i + 2])) { out += `${c}-${src[i + 2]}${other(c)}-${other(src[i + 2]!)}`; i += 2; }
+      else out += letter(c) ? c + other(c) : c;
+    } else if (c === '[') { inClass = true; out += c; }
+    else out += letter(c) ? `[${c.toLowerCase()}${c.toUpperCase()}]` : c;
+  }
+  return out;
+}
+/** A rule regex. `ci` makes it case-insensitive everywhere except the ALL-CAPS class. */
+const build = (source: string, ci: boolean) => new RegExp((ci ? caseless(source) : source).split(CAPS).join(CAPS_SRC));
+
 const DL = String.raw`\b(?:curl|wget)(?:\.exe)?\b`;
 /** A pipe (`|` or `|&`, not `||`). */
 const PIPE_SIGN = String.raw`(?<!\|)\|(?!\|)&?`;
 const PIPE = String.raw`${PIPE_SIGN}\s*`;
 /**
  * P2-R14: the words of a pipe segment before the interpreter may only be wrappers, options (`-x`, `--x`, `--x=y`,
- * optionally followed by one lower-case value such as `-u root`), env assignments (`X=y`), numbers or durations
- * (`60`, `5s`), and ALL-CAPS values (`KILL`, `L`). Each word fits exactly one of these, so matching is linear.
+ * a bare `--`, optionally followed by one value such as `-u root`), env assignments (`X=y`), numbers or durations
+ * (`60`, `5s`), and ALL-CAPS values (`KILL`, `L`). ALL-CAPS is case-sensitive (`grep`, `tar` are not values), so
+ * the regexes that use it are built without the `i` flag (see `caseless`), and it excludes the wrapper names, which
+ * match in any case: each word fits exactly one class, so a failing match backtracks linearly.
  */
-const WRAPPER = String.raw`(?:sudo|doas|env|time|command|exec|timeout|nice|nohup|stdbuf|ionice|setsid|xargs|builtin)`;
-const PLAIN = String.raw`(?:${WRAPPER}|\d+(?:\.\d+)?[smhd]?|[A-Z][A-Z0-9_]*|[A-Za-z_]\w*=\S*)`;
-const OPTION = String.raw`--?[^\s=-][^\s=]*(?:=\S*)?`;
+const WRAPPER_NAMES = ['sudo', 'doas', 'env', 'time', 'command', 'exec', 'timeout', 'nice', 'nohup', 'stdbuf', 'ionice', 'setsid', 'xargs', 'builtin', 'busybox'];
+const WRAPPER = String.raw`(?:${WRAPPER_NAMES.join('|')})`;
+/** Placeholder for the case-sensitive ALL-CAPS class: `caseless` leaves it alone and `build` fills it in. */
+const CAPS = '\u0000CAPS\u0000';
+const CAPS_SRC = String.raw`(?!(?:${WRAPPER_NAMES.join('|').toUpperCase()})(?:[^\S\n]|$))[A-Z][A-Z0-9_]*`;
+const PLAIN = String.raw`(?:${WRAPPER}|\d+(?:\.\d+)?[smhd]?|${CAPS}|[A-Za-z_]\w*=\S*)`;
+const OPTION = String.raw`(?:--?[^\s=-][^\s=]*(?:=\S*)?|--(?=${H}|$))`;
 const VALUE = String.raw`(?!${PLAIN}(?:${H}|$))[^\s-]\S*`;
-const RUNNER = String.raw`(?:(?:${PLAIN}|${OPTION}(?:\s+${VALUE})?)\s+){0,64}`;
+const RUNNER_WORD = String.raw`(?:${PLAIN}|${OPTION}(?:\s+${VALUE})?)`;
+const RUNNER = String.raw`(?:${RUNNER_WORD}\s+){0,64}`;
 const INTERP = String.raw`(?:(?:ba|z|da|k)?sh|python[23]?|node|perl|ruby)`;
 /**
  * P2-R11a: code given on the interpreter's command line (-c/-e/-p) runs the piped download only if it executes
  * something: exec, eval, compile, system, subprocess, spawn, popen, source, interact, repl, fileinput, runpy, `$(cat`,
- * a backtick `cat`, or a shell word. Plain stdin parsing (json.load(sys.stdin), print(…)) is data. `-m` is data.
+ * a backtick `cat`, a shell word, /dev/stdin or /dev/fd/0, or a leading `. ` (source). Plain stdin parsing
+ * (json.load(sys.stdin), print(…)) is data. `-m` is data.
  */
-const RUNS_INPUT = String.raw`(?:exec|eval|compile|system|subprocess|spawn|popen|source|interact|repl|fileinput|runpy|\$\(\s*cat\b|\x60\s*cat\b|\b(?:ba|z|da|k)?sh\b)`;
+const RUNS_INPUT = String.raw`(?:exec|eval|compile|system|subprocess|spawn|popen|source|interact|repl|fileinput|runpy|\/dev\/(?:stdin|fd\/0)|\$\(\s*cat\b|\x60\s*cat\b|\b(?:ba|z|da|k)?sh\b|["'\s;&(]\.${H})`;
+/** A shell run as root with no command reads its commands from stdin: `sudo -s`, `sudo -i`, `sudo -Es`, `doas -s`. */
+const ROOT_SHELL = String.raw`(?:sudo|doas)(?=[^|\n;&]*?${H}(?:-[a-zA-Z]*[si]|--shell\b|--login\b))(?:\s+[^\s|;&)]+){1,16}?${H}*(?=$|[|;&)])`;
 /**
- * What a download can be piped into to run it: an interpreter, after wrappers, by name or by any absolute path.
- * It follows PIPE_SIGN directly: the leading lookahead fails a segment with no interpreter name in one pass, and it
+ * What a download can be piped into to run it: an interpreter (or su), after wrappers, by name or by any path,
+ * optionally quoted; a root shell; or `xargs … sh -c` (the input becomes the code, whatever the -c code is). It
+ * follows PIPE_SIGN directly: the leading lookahead fails a segment with no interpreter name in one pass, and it
  * runs once per pipe, before the whitespace after the pipe (a lookahead after `\s*` would rescan per space). A pipe
- * that ends its line also passes, so the block pre-test still finds a command wrapped onto the next line.
+ * that ends its line also passes, so the block pre-test still finds a command wrapped onto the next line. More than
+ * 64 wrapper words in a row hits the bound and fails closed (matches).
  */
-const SHELL = String.raw`(?=[^|\n]*?(?:sh|python|node|perl|ruby)|${H}*$)\s*(?:tee\b[^|\n]*?>\(\s*)?${RUNNER}(?:(?:\/[^\s/]+){0,32}\/)?(?:${INTERP}${H}+-\w*[cep]\b[^|\n]*?${RUNS_INPUT}|(?:ba|z|da|k)?sh\b(?!${H}+-c\b)|python[23]?\b(?!${H}+-[cm]\b)|node\b(?!${H}+-[ep]\b)|perl\b(?!${H}+-\w*e)|ruby\b(?!${H}+-e\b)|\$\{?SHELL\b)`;
+const SHELL = String.raw`(?=[^|\n]*?(?:sh|python|node|perl|ruby|su)|${H}*$)\s*(?:tee\b[^|\n]*?>\(\s*)?(?:${RUNNER}(?:${ROOT_SHELL}|["']?(?:[^\s/|"']*(?:\/[^\s/|"']+){0,32}\/)?(?:(?<=\bxargs\b[^|\n]{0,1024})(?:ba|z|da|k)?sh${H}+-\w*c\b|${INTERP}${H}+-\w*[cep]\b[^|\n]*?${RUNS_INPUT}|(?:ba|z|da|k)?sh\b(?!${H}+-c\b)|python[23]?\b(?!${H}+-[cm]\b)|node\b(?!${H}+-[ep]\b)|perl\b(?!${H}+-\w*e)|ruby\b(?!${H}+-e\b)|su\b(?!${H}+-c\b)|\$\{?SHELL\b))|(?:${RUNNER_WORD}\s+){65})`;
 const PS_DL = String.raw`\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|curl(?:\.exe)?|wget(?:\.exe)?)\b`;
 const IEX = String.raw`\b(?:iex|Invoke-Expression)\b`;
 const SUBST = String.raw`["']?(?:\$\(|\x60)\s*${DL}`; // "$(curl" or `curl
@@ -151,7 +196,7 @@ export const RULES: readonly Rule[] = [
 
   // Download-and-run and remote code (scripts).
   { id: 'download-and-run/curl-pipe-shell', needles: ['curl', 'wget'], severity: 'critical', target: 'script', message: 'downloads and runs remote code',
-    re: re(pipeToShell(''), 'i') },
+    re: build(pipeToShell(''), true) },
   { id: 'download-and-run/fetch-and-exec', needles: ['<(', '$(', '`', 'iex', 'invoke-expression', '<<'], severity: 'critical', target: 'script', message: 'executes a script fetched from the internet at run time',
     re: re(any(substitution, iexFirst(''), downloadToIex('2'), firstThen('3', HEREDOC, String.raw`[^\n]*?${DL}`)), 'i') },
   // Upstream: curl …(-o|-O|--output)\s*\S+…(&&|;)…(sh|python|node|chmod +x|./x): the same steps in order,
@@ -166,8 +211,8 @@ export const RULES: readonly Rule[] = [
   { id: 'remote-code/exec-url', needles: ['exec', 'eval', 'function'], severity: 'critical', target: 'script', message: 'executes code fetched from a URL',
     re: re(String.raw`(?:^|\))(?=(?<pre>[^)\n]*?)${lineLocal(EXEC_CALL)})\k<pre>(?<hit>${EXEC_CALL}[^)\n]*(?:urlopen|requests\.get|httpx\.get|urllib\.request|fetch\())`, 'i') },
   { id: 'encoded-exec/eval-decoded', needles: ['eval', 'exec', 'base64'], severity: 'critical', target: 'script', message: 'executes encoded or compressed code',
-    re: re(any(String.raw`\b(?:eval|exec)\s*\(\s*(?:[\w.]*\.)?(?:b64decode|b32decode|b16decode|a85decode|b85decode|decodebytes|decodestring|unhexlify|fromhex|decompress|atob|base64|codecs\.decode|Buffer\.from)`,
-      firstThen('', DECODE, String.raw`[^\n]*?${PIPE_SIGN}${SHELL}`), firstThen('2', String.raw`\beval\b`, String.raw`[^\n]*?${DECODE}`))) },
+    re: build(any(String.raw`\b(?:eval|exec)\s*\(\s*(?:[\w.]*\.)?(?:b64decode|b32decode|b16decode|a85decode|b85decode|decodebytes|decodestring|unhexlify|fromhex|decompress|atob|base64|codecs\.decode|Buffer\.from)`,
+      firstThen('', DECODE, String.raw`[^\n]*?${PIPE_SIGN}${SHELL}`), firstThen('2', String.raw`\beval\b`, String.raw`[^\n]*?${DECODE}`)), false) },
 
   // Credentials and exfiltration (scripts).
   { id: 'credential-read/home-credentials', needles: ['.ssh', '.aws', '.netrc', '.docker', '.kube', '.config'], severity: 'critical', target: 'script', message: 'reads credential files',
@@ -184,7 +229,7 @@ export const RULES: readonly Rule[] = [
   // Instruction text that tells the agent to download and run code. A warning, not a block: the spec scopes
   // download-and-run blocking to scripts, but a skill telling the agent to run `curl … | sh` should be visible.
   { id: 'download-and-run/instructed', needles: ['curl', 'wget', 'iex', 'invoke-expression', '<(', '$(', '`'], severity: 'warning', target: 'text', message: 'tells the agent to download and run remote code',
-    re: re(any(pipeToShell(''), substitution, iexFirst('2'), downloadToIex('3')), 'i') },
+    re: build(any(pipeToShell(''), substitution, iexFirst('2'), downloadToIex('3')), true) },
 
   // Permission bypass (instruction text) and broad tool grants (frontmatter).
   { id: 'permission-bypass/skip-permissions', needles: ['--dangerously', '--yolo', 'bypasspermissions', 'prompt'], severity: 'warning', target: 'text', message: 'tells the agent to bypass permission prompts',

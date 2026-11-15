@@ -7,6 +7,16 @@
 // defensive phrase must come before it in the same sentence; a pattern must be a direct string argument of a
 // regex call (Python, JS/TS only); printing must not be redirected or piped anywhere; and "localhost" needs a
 // loopback URL and no other possible target on the line.
+//
+// Known limit (ruling P2-R15): the spec downgrades matches in script comments, docstrings and regex patterns, and
+// a script can always read its own text back and run it (`exec(open(__file__).read()...)`, `eval "${X#*#}"` over a
+// comment, `os.system(P.pattern)`). That self-extraction class can't be closed by pattern scanning; the deny list
+// covers it. Cheap guards remove the downgrade where a file visibly reads such text back: `__doc__`, `getdoc`,
+// `getattr`, `globals(`, `locals(`, `vars(`, `__dict__` disable Python docstring downgrades, and `.pattern` / `.source`
+// disable regex-argument downgrades. What is never accepted is a lexer bug that makes executable code look like a
+// comment, docstring or pattern; the lexers below are deliberately conservative and stop downgrading once a file
+// holds a construct they can't follow (a multi-line string or heredoc in shell-like files, `/*` or a backtick in a
+// JS code line, a multi-line f-string with braces in Python).
 import type { Rule } from './rules.js';
 
 export const REASONS = {
@@ -36,6 +46,13 @@ export interface MatchSite {
   spans: readonly Span[];
   /** The line is inside the file's YAML frontmatter. */
   frontmatter: boolean;
+  /** The file reads a regex's text back (`.pattern`, `.source`): regex arguments don't downgrade (see readsPatterns). */
+  readsPatterns: boolean;
+}
+
+/** Whether a script reads a compiled regex's text back (`P.pattern`, `re.source`), so its patterns may be code. */
+export function readsPatterns(text: string): boolean {
+  return /\.(?:pattern|source)\b/.test(text);
 }
 
 const JS_FILE = /\.(?:js|mjs|cjs|ts)$/i;
@@ -66,8 +83,37 @@ export function quotedSpans(lines: string[], kind: FileKind, file: string): Map<
   }
   if (JS_FILE.test(file)) jsLineComments(lines, add);
   else if (PY_FILE.test(file)) pyCommentsAndDocstrings(lines, add);
-  else lines.forEach((l, i) => { if (/^\s*#/.test(l) && !(i === 0 && l.startsWith('#!'))) add(i, WHOLE); });
+  else hashLineComments(lines, file, add);
   return spans;
+}
+
+const PERL_RUBY = /\.(?:rb|pl)$/i;
+/** Ruby/Perl quote-like literals that may span lines: %q( %Q{ %w[ %( q{ qq( qw/ … */
+const QUOTE_LIKE = /%[qQwWiIrsx]?[({[<|!/]|(?<![\w$@%])q[qwrx]?\s*[({[<|!/]/;
+
+/**
+ * Shell, Ruby, Perl, PowerShell, Makefile and the like (P2-R12): a line whose first non-space character is `#`
+ * (not a `#!` first line) is a comment, but only before the first other line that has an odd number of `'` or `"`
+ * (a string that may continue on the next lines, `@"` here-strings included) or a heredoc operator `<<`, or in
+ * Ruby/Perl a quote-like literal. After that line the lexer can't tell a comment from string or heredoc text that
+ * the script may run, so no `#` line downgrades.
+ */
+function hashLineComments(lines: string[], file: string, add: (i: number, s: Span) => void): void {
+  const quoteLike = PERL_RUBY.test(file);
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]!;
+    if (/^\s*#/.test(l)) {
+      if (!(i === 0 && l.startsWith('#!'))) add(i, WHOLE);
+      continue;
+    }
+    if (count(l, "'") % 2 === 1 || count(l, '"') % 2 === 1 || l.includes('<<') || (quoteLike && QUOTE_LIKE.test(l))) return;
+  }
+}
+
+function count(l: string, c: string): number {
+  let n = 0;
+  for (let k = l.indexOf(c); k >= 0; k = l.indexOf(c, k + 1)) n++;
+  return n;
 }
 
 /** Index of `q` (a quote or triple quote) in `l` at or after `k`, skipping backslash escapes; -1 if none. */
@@ -81,13 +127,14 @@ function closingQuote(l: string, k: number, q: string): number {
 
 /**
  * JS/TS whole-line comments: a line that starts with `//`, a block comment whose first line starts with `/*`
- * (up to its closing `*\/`), and the lines inside it. Without a full JS lexer a template literal could hide such
- * a line, so comments count only before the first line of code that holds a backtick, and never on a line after
- * one ending in a backslash (string continuation). An unclosed block comment quotes nothing.
+ * (up to its closing `*\/`), and the lines inside it. Without a full JS lexer a template literal or a block comment
+ * opened mid-line could hide such a line (`x = 1 /* note` then `// *\/ code`), so comments count only before the
+ * first line of code that holds a backtick or `/*`, and never on a line after one ending in a backslash (string
+ * continuation). An unclosed block comment quotes nothing.
  */
 function jsLineComments(lines: string[], add: (i: number, s: Span) => void): void {
   let block: Array<[number, Span]> | undefined;
-  let afterBacktick = false;
+  let lost = false;
   lines.forEach((l, i) => {
     if (block) {
       const close = l.indexOf('*/');
@@ -95,23 +142,26 @@ function jsLineComments(lines: string[], add: (i: number, s: Span) => void): voi
       for (const [li, sp] of block) add(li, sp);
       add(i, [0, close + 2]);
       block = undefined;
-      if (l.slice(close + 2).includes('`')) afterBacktick = true;
+      if (opensUnknown(l.slice(close + 2))) lost = true;
       return;
     }
     const at = l.length - l.trimStart().length;
-    const eligible = !afterBacktick && !(i > 0 && /\\$/.test(lines[i - 1]!));
+    const eligible = !lost && !(i > 0 && /\\$/.test(lines[i - 1]!));
     if (eligible && l.startsWith('//', at)) { add(i, [at, Infinity]); return; }
     if (eligible && l.startsWith('/*', at)) {
       const close = l.indexOf('*/', at + 2);
       if (close >= 0) {
         add(i, [at, close + 2]);
-        if (l.slice(close + 2).includes('`')) afterBacktick = true;
+        if (opensUnknown(l.slice(close + 2))) lost = true;
       } else block = [[i, [at, Infinity]]];
       return;
     }
-    if (l.includes('`')) afterBacktick = true;
+    if (opensUnknown(l)) lost = true;
   });
 }
+
+/** JS code that may start a construct spanning lines that jsLineComments doesn't follow: a template or a block comment. */
+const opensUnknown = (code: string) => code.includes('`') || code.includes('/*');
 
 const PY_HEADER = /^\s*(?:async\s+)?(?:def|class)\b/;
 const PY_DOC_OPENER = /^\s*[rRbBuU]{0,2}(?:"""|''')/;
@@ -121,11 +171,16 @@ const PY_DOC_OPENER = /^\s*[rRbBuU]{0,2}(?:"""|''')/;
  * backslash-continued, f-strings with nested quotes in braces), bracket depth and line continuations. A bare
  * docstring is a closed, non-f triple-quoted string that is the first statement of the module or of a def/class
  * body: the first token of a statement line (not inside brackets, not after a backslash), with nothing after its
- * closing quote. A file that reads `__doc__` gets no docstring downgrades.
+ * closing quote. A file that may read a docstring back (`__doc__`, `getdoc`, `getattr`, `globals(`, `locals(`,
+ * `vars(`, `__dict__`) gets no docstring downgrades. A string prefix is the whole identifier run before the quote
+ * (`if"x"` is the keyword `if` and a plain string). An f-string that spans lines and holds `{` (Python 3.12 allows
+ * nested quotes of any kind in its braces, which this lexer can't follow) ends all downgrades from its first line on.
  */
 function pyCommentsAndDocstrings(lines: string[], add: (i: number, s: Span) => void): void {
-  const docsAllowed = !lines.some((l) => l.includes('__doc__'));
-  type Str = { q: string; f: boolean; doc: boolean; line: number; at: number; pending: Array<[number, Span]> };
+  const docsAllowed = !lines.some((l) => DOC_READ.test(l));
+  let lost = false; // a multi-line f-string with braces: the lexer can no longer be trusted
+  const put = (i: number, s: Span) => { if (!lost) add(i, s); };
+  type Str = { q: string; f: boolean; multi?: boolean; doc: boolean; line: number; at: number; pending: Array<[number, Span]> };
   let str: Str | undefined;
   let depth = 0;
   let continued = false; // the previous line ended with a backslash outside a string
@@ -134,7 +189,7 @@ function pyCommentsAndDocstrings(lines: string[], add: (i: number, s: Span) => v
   lines.forEach((l, i) => {
     const statementStart = !str && depth === 0 && !continued;
     const trimmed = l.trim();
-    if (statementStart && trimmed.startsWith('#')) { if (!(i === 0 && l.startsWith('#!'))) add(i, WHOLE); return; }
+    if (statementStart && trimmed.startsWith('#')) { if (!(i === 0 && l.startsWith('#!'))) put(i, WHOLE); return; }
     if (statementStart && trimmed === '') return;
     if (statementStart) {
       if (PY_HEADER.test(l)) header = true;
@@ -146,14 +201,17 @@ function pyCommentsAndDocstrings(lines: string[], add: (i: number, s: Span) => v
       if (str) {
         const end = closeString(l, k, str);
         if (end < 0) {
+          if (str.f && l.slice(str.line === i ? str.at : 0).includes('{')) lost = true;
+          if (str.f) str.multi = true;
           if (str.q.length === 3) str.pending.push([i, str.line === i ? [str.at, Infinity] : WHOLE]);
           else if (!l.endsWith('\\')) str = undefined; // an unterminated one-line string ends with the line
           k = l.length;
           break;
         }
+        if (str.multi && l.slice(0, end).includes('{')) lost = true;
         if (str.doc && docsAllowed && /^\s*(?:#.*)?$/.test(l.slice(end + str.q.length))) {
-          for (const [li, sp] of str.pending) add(li, sp);
-          add(i, [str.line === i ? str.at : 0, end]);
+          for (const [li, sp] of str.pending) put(li, sp);
+          put(i, [str.line === i ? str.at : 0, end]);
         }
         k = end + str.q.length;
         lastCode = k - 1;
@@ -164,7 +222,7 @@ function pyCommentsAndDocstrings(lines: string[], add: (i: number, s: Span) => v
       if (c === '#') break;
       if (c === '"' || c === "'") {
         const q = l.startsWith(c.repeat(3), k) ? c.repeat(3) : c;
-        const prefix = /[rRbBuUfF]{0,2}$/.exec(l.slice(Math.max(0, k - 2), k))![0];
+        const prefix = pyPrefix(l, k);
         const f = /[fF]/.test(prefix);
         const first = l.slice(0, k - prefix.length).trim() === '';
         str = { q, f, doc: q.length === 3 && !f && statementStart && first && expectDoc, line: i, at: k + q.length, pending: [] };
@@ -172,9 +230,9 @@ function pyCommentsAndDocstrings(lines: string[], add: (i: number, s: Span) => v
         k += q.length;
         continue;
       }
-      if ('([{'.includes(c)) depth++;
-      else if (')]}'.includes(c)) depth = Math.max(0, depth - 1);
-      if (!/\s/.test(c)) lastCode = k;
+      if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') depth = Math.max(0, depth - 1);
+      if (c !== ' ' && c !== '\t' && c !== '\f' && c !== '\v') lastCode = k;
       k++;
     }
     continued = !str && lastCode >= 0 && l[lastCode] === '\\';
@@ -185,6 +243,14 @@ function pyCommentsAndDocstrings(lines: string[], add: (i: number, s: Span) => v
     }
   });
   // An unclosed triple-quoted string at the end of the file quotes nothing.
+}
+
+const DOC_READ = /__doc__|getdoc|getattr|\bglobals\(|\blocals\(|\bvars\(|__dict__/;
+
+/** The string prefix before the quote at k: the whole identifier run before it, if that is 1–2 prefix letters. */
+function pyPrefix(l: string, k: number): string {
+  const run = /\w{0,3}$/.exec(l.slice(Math.max(0, k - 3), k))![0];
+  return /^[rRbBuUfF]{1,2}$/.test(run) ? run : '';
 }
 
 /** Index of the current string's closing quote on this line, or -1. In f-strings, quotes inside braces are nested strings. */
@@ -271,28 +337,37 @@ function defensiveBefore(site: MatchSite): boolean {
   return /\btreat\b/i.test(region) && /^[^.!?]{0,30}?\bas\s+data\b/i.test(site.text.slice(site.index + site.length, site.index + site.length + 64));
 }
 
-const PY_REGEX_CALL = /\bre\.(?:search|match|compile|findall|finditer|sub|subn|fullmatch|split|escape)\(/g;
-const JS_REGEX_CALL = /\b(?:new\s+)?RegExp\(/g;
+const PY_REGEX_CALL = /(?<![\w.])re\.(?:search|match|compile|findall|finditer|sub|subn|fullmatch|split|escape)\(/g;
+const JS_REGEX_CALL = /(?<![\w$.])(?:new\s+)?RegExp\(/g;
 
 /**
  * Python and JS/TS only: the match lies inside a string literal that is a direct argument of a regex call
- * (re.compile(…), re.escape(…), new RegExp(…)), not nested in another call or expression.
+ * (re.compile(…), re.escape(…), new RegExp(…)), not nested in another call or expression, and not interpolated.
+ * Never in a file that reads a pattern's text back (`.pattern`, `.source`).
  */
 function insideRegexCall(site: MatchSite): boolean {
-  const calls = PY_FILE.test(site.file) ? PY_REGEX_CALL : JS_FILE.test(site.file) ? JS_REGEX_CALL : undefined;
-  if (!calls) return false;
+  const py = PY_FILE.test(site.file);
+  const calls = py ? PY_REGEX_CALL : JS_FILE.test(site.file) ? JS_REGEX_CALL : undefined;
+  if (!calls || site.readsPatterns || !site.text.includes(py ? 're.' : 'RegExp(')) return false;
   const opens = [...site.text.slice(0, site.index).matchAll(calls)].slice(-8).map((m) => m.index! + m[0].length - 1);
-  return opens.some((open) => directStringArgument(site.text, open, site.index, site.index + site.length));
+  return opens.some((open) => directStringArgument(site.text, open, site.index, site.index + site.length, py));
 }
 
-/** A string literal at bracket depth 1 of the call opened at `open` encloses [from, to). */
-function directStringArgument(text: string, open: number, from: number, to: number): boolean {
+/**
+ * A string literal at bracket depth 1 of the call opened at `open` encloses [from, to). An interpolated or tagged
+ * string anywhere in the arguments before the match (a Python f-string, a JS template holding `${`, a tagged
+ * template) means no: its braces run code, and this scan can't follow nested quotes inside them.
+ */
+function directStringArgument(text: string, open: number, from: number, to: number, py: boolean): boolean {
   let depth = 0;
   for (let k = open; k < text.length && k < from; k++) {
     const c = text[k]!;
     if (c === '"' || c === "'" || c === '`') {
+      if (py && (/[fF]/.test(pyPrefix(text, k)) || (/\w/.test(text[k - 1] ?? '') && pyPrefix(text, k) === ''))) return false;
+      if (!py && c === '`' && /[\w$)\].]\s*$/.test(text.slice(Math.max(0, k - 64), k))) return false;
       const end = closingQuote(text, k + 1, c);
       if (end < 0) return false;
+      if (c === '`' && text.slice(k, end).includes('${')) return false;
       if (depth === 1 && k < from && to <= end) return true;
       k = end;
     } else if (c === '(' || c === '[' || c === '{') depth++;
@@ -347,25 +422,81 @@ function localOnly(site: MatchSite): boolean {
 
 const CLIENT_CALL = /\b(?:(?:requests|httpx)\.\w+|urlopen|axios(?:\.\w+)?)\s*\(|(?:\$|\b)\w*fetch\w*\s*\(/gi;
 
+/** Options that can send the request elsewhere, or arguments that can carry them unseen (`**kw`, `...opts`). */
+const PROGRAM_REROUTE = /[pP][rR][oO][xX]|\*\*|\.\.\.|\b(?:dispatcher|agent|httpAgent|httpsAgent|transport|mounts|adapter|baseURL|base_url|socketPath|lookup|opener)\b/;
+/** Interpolated strings: a JS template holding `${`, a Python f-string (any prefix with f). */
+const INTERPOLATED = /\$\{|(?<![\w$])[rRbBuU]?[fF][rRbBuU]?["']/;
+
+/**
+ * Python/JS (P2-R13): every client call's first argument is exactly a non-interpolated loopback string literal (or,
+ * for a keyword-first call, its `url=` is); every later positional argument is a string, an object literal or
+ * carries the environment (the data); no option on the line can reroute the request; and every `url=`/`url:` is
+ * exactly a loopback literal.
+ */
 function programLocalOnly(s: string): boolean {
-  if (/prox/i.test(s)) return false;
+  if (PROGRAM_REROUTE.test(s) || INTERPOLATED.test(s)) return false;
   const calls = [...s.matchAll(CLIENT_CALL)];
-  if (calls.length === 0) return false;
-  const literal = (k: number) => {
-    while (/\s/.test(s[k] ?? '')) k++;
-    if (/[fF]/.test(s[k] ?? '') && /["']/.test(s[k + 1] ?? '')) k++;
-    const q = s[k];
-    if (q !== '"' && q !== "'" && q !== '`') return false;
-    const end = closingQuote(s, k + 1, q);
-    return end > 0 && LOOPBACK_URL.test(s.slice(k + 1, end));
-  };
-  const urlArgs = [...s.matchAll(/\burl\s*[=:]\s*/g)];
-  // A call whose first argument is a keyword (url=…) takes its URL from the url= check below.
-  const keywordFirst = (k: number) => /^\s*\w+\s*=(?!=)/.test(s.slice(k, k + 64));
-  if (!calls.every((m) => literal(m.index! + m[0].length) || (keywordFirst(m.index! + m[0].length) && urlArgs.length > 0))) return false;
-  return urlArgs.every((m) => literal(m.index! + m[0].length));
+  // Each call's arguments are split by a scan to its closing paren; nested calls would make that quadratic.
+  if (calls.length === 0 || calls.length > 16) return false;
+  const keyword = (a: string) => /^\w+\s*=(?!=)/.test(a);
+  for (const m of calls) {
+    const args = callArgs(s, m.index! + m[0].length);
+    if (!args || args.length === 0) return false;
+    if (keyword(args[0]!) ? !args.some((a) => /^url\s*=/.test(a)) : !isLiteral(args[0]!, true)) return false;
+    for (const a of args.slice(1)) {
+      if (keyword(a) || a.startsWith('{') || isLiteral(a, false) || /os\.environ|os\.getenv|process\.env/.test(a)) continue;
+      return false;
+    }
+  }
+  return [...s.matchAll(/\burl\s*[=:]\s*/g)].every((m) => {
+    const rest = s.slice(m.index! + m[0].length);
+    const end = literalEnd(rest);
+    return end > 0 && /^\s*(?:[,)}]|$)/.test(rest.slice(end)) && isLiteral(rest.slice(0, end), true);
+  });
 }
 
+/** The arguments (trimmed) of the call whose `(` ends just before `from`, split at its top-level commas. */
+function callArgs(s: string, from: number): string[] | undefined {
+  const args: string[] = [];
+  let depth = 0;
+  let start = from;
+  for (let k = from; k < s.length; k++) {
+    const c = s[k]!;
+    if (c === '"' || c === "'" || c === '`') {
+      const end = closingQuote(s, k + 1, c);
+      if (end < 0) return undefined;
+      k = end;
+    } else if (c === '(' || c === '[' || c === '{') depth++;
+    else if (c === ')' || c === ']' || c === '}') {
+      if (depth === 0) {
+        if (c !== ')') return undefined;
+        const last = s.slice(start, k).trim();
+        if (last || args.length) args.push(last);
+        return args.filter((a, n) => a !== '' || n < args.length - 1);
+      }
+      depth--;
+    } else if (c === ',' && depth === 0) { args.push(s.slice(start, k).trim()); start = k + 1; }
+  }
+  return undefined;
+}
+
+/** Length of the string literal (optional r/b/u prefix) at the start of `a`, or -1. */
+function literalEnd(a: string): number {
+  const m = /^[rRbBuU]{0,2}(["'`])/.exec(a);
+  if (!m) return -1;
+  const end = closingQuote(a, m[0].length, m[1]!);
+  return end < 0 ? -1 : end + 1;
+}
+
+/** `a` is exactly one plain string literal (a loopback URL when `loopback`). */
+function isLiteral(a: string, loopback: boolean): boolean {
+  const end = literalEnd(a);
+  if (end !== a.length) return false;
+  const open = a.search(/["'`]/);
+  return !loopback || LOOPBACK_URL.test(a.slice(open + 1, end - 1));
+}
+
+const SHELL_WRAPPERS = new Set(['sudo', 'doas', 'command', 'exec', 'time', 'nohup', 'builtin', 'env', 'nice', 'setsid']);
 const DOWNLOADER = /^(?:.*\/)?(?:curl|wget)(?:\.exe)?$/;
 /** Options whose value is the next word (curl and wget). Others are taken to have no value. */
 const VALUE_OPTIONS = new Set(['-d', '--data', '--data-raw', '--data-binary', '--data-urlencode', '--data-ascii', '--json', '-H', '--header',
@@ -381,7 +512,8 @@ function shellLocalOnly(s: string): boolean {
   const words = shellWords(s);
   if (!words) return false;
   const start = words.findIndex((w) => DOWNLOADER.test(w.text));
-  if (start < 0) return false;
+  // Only known wrappers may come before the downloader: no `VAR=value` (http_proxy=…, CURL_HOME=…), no options.
+  if (start < 0 || words.slice(0, start).some((w) => w.quoted || !SHELL_WRAPPERS.has(w.text))) return false;
   const wget = words[start]!.text.includes('wget');
   let targets = 0;
   for (let k = start + 1; k < words.length; k++) {

