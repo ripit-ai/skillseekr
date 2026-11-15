@@ -1,7 +1,7 @@
 // Secret-shaped and invisible-character fixture content, built at test time from split parts so that nothing
 // in git looks like a real token (GitHub push protection) or hides invisible characters in a diff.
 // Every body is obviously fake but still matches the scanner's pattern.
-import { cp, writeFile } from 'node:fs/promises';
+import { cp, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpDir } from '../../helpers/tmp.js';
 
@@ -27,5 +27,26 @@ export async function materialize(fixtureDir: string, ruleId: string): Promise<s
   await cp(fixtureDir, dir, { recursive: true });
   const text = SECRET_TEXT[ruleId];
   if (text !== undefined) await writeFile(join(dir, SECRET_FILE), `value: ${text}\n`);
+  return dir;
+}
+
+/**
+ * Vendored skillyard fixtures (test/fixtures/skillyard) whose upstream text is secret-shaped. The committed file
+ * holds the placeholder; `materializeSkillyard` restores the upstream bytes in a temp copy (see that dir's README).
+ */
+export const SKILLYARD_SECRETS: ReadonlyArray<{ file: string; placeholder: string; text: string }> = [
+  { file: 'bad/billing-reports/SKILL.md', placeholder: '{{SKILLYARD_FAKE_KEY}}', text: 'sk-' + 'FAKE' + '0'.repeat(40) },
+];
+
+/** Copies the vendored skillyard tree to a fresh temp dir with SKILLYARD_SECRETS restored, and returns its path. */
+export async function materializeSkillyard(fixtureDir: string): Promise<string> {
+  const dir = await tmpDir('skillseekr-skillyard-');
+  await cp(fixtureDir, dir, { recursive: true });
+  for (const s of SKILLYARD_SECRETS) {
+    const path = join(dir, s.file);
+    const text = await readFile(path, 'utf8');
+    if (!text.includes(s.placeholder)) throw new Error(`placeholder ${s.placeholder} missing from ${s.file}`);
+    await writeFile(path, text.split(s.placeholder).join(s.text));
+  }
   return dir;
 }

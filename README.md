@@ -218,3 +218,7 @@ npm run build   # tsc -> dist/
 npm test
 npm run lint
 ```
+
+## Credits
+
+The security scan's rules and context checks are ported from [skillyard](https://github.com/agentwik-labs/skillyard) (MIT, Copyright (c) 2026 Skillyard contributors), and its good-vs-bad example skills are vendored as test fixtures. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the licence text and the list of ported files and fixtures.

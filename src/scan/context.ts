@@ -618,12 +618,14 @@ function enclosedInQuotes(site: MatchSite): boolean {
 // flag it"). The phrase must come before the match, in the same sentence.
 const DEFENSIVE_END = /\b(?:if|when)\s+(?:[\w-]+\s+){0,2}(?:says|contains|tries|asks)(?:\s+(?:you\s+)?to)?[\s:,"'“「(]*$/i;
 const DEFENSIVE_ANY = /never\s+follow|not\s+(?:an?\s+)?instructions?|injection|data,?\s+not|绝不|flag\s+it/i;
+/** A negation directly before the match ("Never ignore previous instructions", "Do not tell the user…") forbids it. */
+const DEFENSIVE_NEGATION = /\b(?:never|do\s+not|don['’]t|must\s+not)\s+$/i;
 
 function defensiveBefore(site: MatchSite): boolean {
   const prefix = site.text.slice(Math.max(0, site.index - 4096), site.index);
   const stops = [...prefix.matchAll(/[.!?;。]/g)];
   const region = stops.length ? prefix.slice(stops[stops.length - 1]!.index! + 1) : prefix;
-  if (DEFENSIVE_END.test(region) || DEFENSIVE_ANY.test(region)) return true;
+  if (DEFENSIVE_END.test(region) || DEFENSIVE_ANY.test(region) || DEFENSIVE_NEGATION.test(region)) return true;
   // "Treat <match> as data."
   return /\btreat\b/i.test(region) && /^[^.!?]{0,30}?\bas\s+data\b/i.test(site.text.slice(site.index + site.length, site.index + site.length + 64));
 }
@@ -675,15 +677,25 @@ const AFTER_PRINT = /^[ \t]*(?:\)[ \t]*)?(?:1?>&2[ \t]*)?(?:;[ \t]*)?(?:(?:#|\/\
 /**
  * The line is a print statement whose first string argument holds the whole match, nothing runs after the
  * string (no pipe, second command or file redirect), and the string can't run code itself (no `$(`, `${`,
- * backticks, or f-string braces).
+ * backticks, or f-string braces). Shell `printf 'FORMAT' "STRING"` (Task 2 corpus): a format with no `$` or
+ * backtick, then exactly one string argument that holds the match.
  */
 function onlyPrints(site: MatchSite): boolean {
   const m = PRINT_CALL.exec(site.text);
   if (!m) return false;
-  const quote = m[1]!;
-  const start = m[0].length;
-  const end = site.text.indexOf(quote, start);
-  if (end < 0 || site.index < start || site.index + site.length > end) return false;
+  let quote = m[1]!;
+  let start = m[0].length;
+  let end = site.text.indexOf(quote, start);
+  if (end < 0) return false;
+  if (site.index > end && /^[ \t]*printf[ \t]*['"]$/.test(m[0]) && !/[$`]/.test(site.text.slice(start, end))) {
+    const arg = /^[ \t]+(["'])/.exec(site.text.slice(end + 1, end + 18));
+    if (!arg) return false;
+    quote = arg[1]!;
+    start = end + 1 + arg[0].length;
+    end = site.text.indexOf(quote, start);
+    if (end < 0) return false;
+  }
+  if (site.index < start || site.index + site.length > end) return false;
   const body = site.text.slice(start, end);
   if (/\$\(|\$\{|`/.test(body) || (/[fF]["'`]$/.test(m[0]) && body.includes('{'))) return false;
   return AFTER_PRINT.test(site.text.slice(end + 1));

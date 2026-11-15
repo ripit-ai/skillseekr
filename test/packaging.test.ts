@@ -58,6 +58,7 @@ describe('npm package', () => {
     expect(files).toContain('plugins/skillseekr/.mcp.json');
     expect(files).toContain('plugins/skillseekr/skills/skillseekr/SKILL.md');
     expect(files).toContain('.claude-plugin/marketplace.json');
+    expect(files).toContain('THIRD_PARTY_NOTICES.md'); // skillyard's MIT notice ships with the ported code in dist/
   });
 
   it('npm pack leaves out tests, sources and .superpowers', () => {

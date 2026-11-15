@@ -13,7 +13,8 @@
     "dist",
     "assets",
     "plugins",
-    ".claude-plugin"
+    ".claude-plugin",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "build": "tsc",
