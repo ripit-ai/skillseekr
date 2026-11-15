@@ -2,6 +2,7 @@ import { parseRegistriesFile } from '../config/load.js';
 import type { Ctx } from '../context.js';
 import { readGithubFile, type FetchOpts } from '../sources/github.js';
 import { fetchHttpText } from '../sources/http.js';
+import { policyProblemKey } from '../policy/parse.js';
 import type { Policy } from '../policy/types.js';
 import type { Config, IncludeEntry, Problem, RegistriesFile, RegistryEntry, SourceEntry } from '../types.js';
 
@@ -46,6 +47,7 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
   const overrides: Override[] = [];
   const hoisted = new Map<string, ResolvedRegistry>();
   let stale = false;
+  const policySeen = new Set<string>();
   const policy: Policy = {
     sources: [{ source: { kind: 'local', file: config.path }, allow: config.policy.allow, block: config.policy.block }],
     trust: config.policy.trust,
@@ -141,7 +143,13 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
 
       const file = fileLabel(entry);
       const { parsed } = r;
-      for (const p of parsed.problems) {
+      const honoured = entry.policy && depth === 1;
+      for (const p0 of parsed.problems) {
+        let p = p0;
+        const pk = p0.code === 'policy/invalid-entry' ? policyProblemKey(p0) : undefined;
+        if (pk && (pk === 'trust' || !honoured)) {
+          p = { ...p0, level: 'warning', message: `${p0.message.replace(/ Skipped\.$/, '')} ${pk} in this file is ignored anyway (${pk === 'trust' ? 'only the local config may set trust' : 'only the local config and policy:true includes from it may ' + pk}). Skipped.` };
+        }
         problems.push({ ...p, registry: p.registry ?? name, via: p.registry ? [...via, p.registry] : via, file: p.file ?? file });
       }
       const ignored = (key: 'allow' | 'block' | 'trust', code: string, rule: string): void => {
@@ -150,9 +158,8 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
           message: `${key} entries in ${file} are ignored (${rule})`,
         });
       };
-      const honoured = entry.policy && depth === 1;
       const pol = parsed.policy;
-      if (honoured) policy.sources.push({ source: { kind: 'include', name, via, file }, allow: pol.allow, block: pol.block });
+      if (honoured) { if (!policySeen.has(id)) { policySeen.add(id); policy.sources.push({ source: { kind: 'include', name, via, file }, allow: pol.allow, block: pol.block }); } }
       else {
         if (Object.keys(pol.allow).length > 0) ignored('allow', 'policy/ignored-allow', 'only the local config and policy:true includes from it may allow');
         if (pol.block.length > 0) ignored('block', 'policy/ignored-block', 'only the local config and policy:true includes from it may block');

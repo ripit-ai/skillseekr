@@ -420,3 +420,65 @@ describe('resolve policy', () => {
     expect(r.problems).toMatchObject([{ code: 'policy/invalid-entry', level: 'error', registry: 'P', via: ['P'] }]);
   });
 });
+
+describe('resolve policy review fixes', () => {
+  const H = `sha256:${'b'.repeat(64)}`;
+  const allowOf = (n: string) => ({ [n]: { content_hash: H, rules: ['r/1'], reason: 'why', added: '2026-11-14' } });
+  const blockOf = (id: string) => [{ id, reason: 'bad', added: '2026-11-20' }];
+  const codes = (r: { problems: Array<{ code: string }> }) => r.problems.map((p) => p.code);
+
+  it('invalid entries in a non-policy include are warnings, not errors', async () => {
+    const { config, ctx } = await setup({
+      local: { N: ghInclude('n') },
+      repos: { 'o/n': repoWith({}, { block: [{ id: 'x' }], allow: { a: 1 }, trust: [{ owner: 'o' }] }) },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.problems).toHaveLength(3);
+    expect(r.problems.every((p) => p.code === 'policy/invalid-entry' && p.level === 'warning' && p.registry === 'N')).toBe(true);
+    expect(r.problems[0]?.message).toContain('ignored');
+  });
+
+  it('invalid block entries in a honoured policy include stay errors; invalid trust there is a warning', async () => {
+    const { config, ctx } = await setup({
+      local: { P: ghInclude('p', { policy: true }) },
+      repos: { 'o/p': repoWith({}, { block: [{ id: 'x' }], trust: [{ owner: 'o' }] }) },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.problems.map((p) => p.level)).toEqual(['error', 'warning']);
+  });
+
+  it('a file included twice at depth 1 with policy:true contributes once', async () => {
+    const { config, ctx } = await setup({
+      local: { P1: ghInclude('p', { policy: true }), P2: ghInclude('p', { policy: true }) },
+      repos: { 'o/p': repoWith({}, { block: blockOf('p') }) },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.policy.sources.map((s) => s.source.kind)).toEqual(['local', 'include']);
+    expect(r.problems).toEqual([]);
+  });
+
+  it('same file at depth 1 with policy and again deeper: deeper copy ignored and warned, depth-1 honoured once', async () => {
+    const { config, ctx } = await setup({
+      local: { P: ghInclude('p', { policy: true }), Q: ghInclude('q') },
+      repos: {
+        'o/p': repoWith({}, { allow: allowOf('p'), block: blockOf('p') }),
+        'o/q': repoWith({ Deep: ghInclude('p', { policy: true }) }),
+      },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.policy.sources).toHaveLength(2);
+    expect(r.policy.sources[1]?.source).toMatchObject({ name: 'P' });
+    expect(codes(r)).toEqual(['policy/ignored-allow', 'policy/ignored-block']);
+    expect(r.problems[0]).toMatchObject({ registry: 'Deep', via: ['Q', 'Deep'] });
+  });
+
+  it('an include loop contributes no extra policy', async () => {
+    const { config, ctx } = await setup({
+      local: { P: ghInclude('p', { policy: true }) },
+      repos: { 'o/p': repoWith({ Again: ghInclude('p', { policy: true }) }, { block: blockOf('p') }) },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(codes(r)).toEqual(['resolve/include-loop']);
+    expect(r.policy.sources).toHaveLength(2);
+  });
+});

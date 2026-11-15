@@ -12,13 +12,20 @@ function child(obj: Node, key: string): Node | undefined {
   return obj.children?.find((p) => p.type === 'property' && p.children?.[0]?.value === key)?.children?.[1];
 }
 
+const problemKeys = new WeakMap<Problem, 'allow' | 'block' | 'trust'>();
+/** Which top-level key a `policy/invalid-entry` problem from `parsePolicy` belongs to. */
+export const policyProblemKey = (p: Problem): 'allow' | 'block' | 'trust' | undefined => problemKeys.get(p);
+
 /** Parses the top-level `allow`, `block` and `trust` keys. Invalid entries are skipped with `policy/invalid-entry`. */
 export function parsePolicy(root: Node | undefined, file: string): { policy: PolicyBlock; problems: Problem[] } {
   const policy: PolicyBlock = emptyPolicyBlock();
   const problems: Problem[] = [];
   if (!root || root.type !== 'object') return { policy, problems };
+  let key: 'allow' | 'block' | 'trust' = 'allow';
   const bad = (what: string, why: string): void => {
-    problems.push({ level: 'error', code: 'policy/invalid-entry', file, message: `${file}: ${what} is invalid (${why}). Skipped.` });
+    const p: Problem = { level: 'error', code: 'policy/invalid-entry', file, message: `${file}: ${what} is invalid (${why}). Skipped.` };
+    problemKeys.set(p, key);
+    problems.push(p);
   };
 
   const allowNode = child(root, 'allow');
@@ -39,6 +46,7 @@ export function parsePolicy(root: Node | undefined, file: string): { policy: Pol
     }
   }
 
+  key = 'block';
   const blockNode = child(root, 'block');
   if (blockNode) {
     if (blockNode.type !== 'array') bad('"block"', 'must be an array');
@@ -61,6 +69,7 @@ export function parsePolicy(root: Node | undefined, file: string): { policy: Pol
     }
   }
 
+  key = 'trust';
   const trustNode = child(root, 'trust');
   if (trustNode) {
     if (trustNode.type !== 'array') bad('"trust"', 'must be an array');
