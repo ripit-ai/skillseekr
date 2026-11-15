@@ -7,6 +7,7 @@ import { Command, CommanderError } from 'commander';
 import { defaultContext, type Ctx } from '../context.js';
 import { createEngine, type Engine } from '../engine.js';
 import { registerInstall } from './commands/install.js';
+import { registerKeys } from './commands/keys.js';
 import { registerList } from './commands/list.js';
 import { registerMcp } from './commands/mcp.js';
 import { registerOutdated } from './commands/outdated.js';
@@ -14,6 +15,7 @@ import { registerRegistries } from './commands/registries.js';
 import { registerRemove } from './commands/remove.js';
 import { registerSearch } from './commands/search.js';
 import { registerShow } from './commands/show.js';
+import { registerSign } from './commands/sign.js';
 import { registerDoctor } from './commands/doctor.js';
 import { registerSetup } from './commands/setup.js';
 import { registerSync } from './commands/sync.js';
@@ -26,7 +28,7 @@ export type { Io } from './output.js';
 /** Command registrars, in help order. */
 export const commands: Array<(program: Command, cli: Cli) => void> = [
   registerSetup, registerSearch, registerShow, registerInstall, registerRemove, registerList, registerOutdated,
-  registerUpdate, registerRegistries, registerSync, registerDoctor, registerValidate, registerMcp,
+  registerUpdate, registerRegistries, registerSync, registerDoctor, registerValidate, registerKeys, registerSign, registerMcp,
 ];
 
 function version(): string {

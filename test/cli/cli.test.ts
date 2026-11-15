@@ -414,4 +414,56 @@ describe('cli', () => {
     expect(parsed.changes.some((c: { file?: string }) => c.file?.endsWith('mcp-config.json'))).toBe(true);
     expect(err.join('')).toContain('mcp-config.json');
   });
+
+  describe('keys create and sign', () => {
+    it('keys create writes 0600/0700 files, prints the key, refuses overwrite without --force', async () => {
+      const s = await setup({ registries: {} });
+      const out = join(s.dir, 'keys');
+      const r = await s.run('keys', 'create', '--out', out);
+      expect(r.code).toBe(0);
+      expect(r.out).toMatch(/^ed25519:[A-Za-z0-9_-]{43}\n$/);
+      expect((await readFile(join(out, 'skillseekr-public.txt'), 'utf8')).trim()).toBe(r.out.trim());
+      expect((await stat(join(out, 'skillseekr-private.pem'))).mode & 0o777).toBe(0o600);
+      expect((await stat(out)).mode & 0o777).toBe(0o700);
+      const again = await s.run('keys', 'create', '--out', out);
+      expect(again.code).toBe(1);
+      expect(again.err).toMatch(/already exists/);
+      const forced = await s.run('--json', 'keys', 'create', '--out', out, '--force');
+      expect(forced.code).toBe(0);
+      const j = JSON.parse(forced.out);
+      expect(j.publicKey).not.toBe(r.out.trim());
+      expect(j.privateKeyPath).toBe(join(out, 'skillseekr-private.pem'));
+      expect((await stat(j.privateKeyPath)).mode & 0o777).toBe(0o600);
+    });
+
+    it('sign writes a signature that verifySkillDir accepts; fails without SKILL.md or with a bad key', async () => {
+      const { verifySkillDir } = await import('../../src/sign/sign.js');
+      const s = await setup({ registries: {} });
+      const out = join(s.dir, 'keys');
+      const pub = (await s.run('keys', 'create', '--out', out)).out.trim();
+      const sk = join(s.dir, 'sk');
+      await mkdir(join(sk, 'ref'), { recursive: true });
+      await writeFile(join(sk, 'SKILL.md'), skill('sk'));
+      await writeFile(join(sk, 'ref', 'n.md'), 'n');
+      await symlink('/etc/hostname', join(sk, 'lnk'));
+      const key = join(out, 'skillseekr-private.pem');
+      const r = await s.run('sign', sk, '--key', key);
+      expect(r.code).toBe(0);
+      expect(r.out).toContain('signed 2 files');
+      expect(r.out).toContain(pub);
+      expect(await verifySkillDir(sk, ['SKILL.md', 'ref/n.md'], [pub])).toEqual({ ok: true, changed: [] });
+      expect(Object.keys(JSON.parse(await readFile(join(sk, '.skillseekr-signature.json'), 'utf8')).manifest)).toEqual(['SKILL.md', 'ref/n.md']);
+      // re-signing ignores the existing signature file
+      expect((await s.run('sign', sk, '--key', key)).code).toBe(0);
+      expect(await verifySkillDir(sk, ['SKILL.md', 'ref/n.md'], [pub])).toEqual({ ok: true, changed: [] });
+
+      const empty = join(s.dir, 'empty'); await mkdir(empty);
+      const noSkill = await s.run('sign', empty, '--key', key);
+      expect(noSkill.code).toBe(1);
+      expect(noSkill.err).toMatch(/no SKILL\.md/);
+      await writeFile(join(s.dir, 'bad.pem'), 'nope');
+      expect((await s.run('sign', sk, '--key', join(s.dir, 'bad.pem'))).code).toBe(1);
+      expect((await s.run('sign', sk, '--key', join(s.dir, 'missing.pem'))).code).toBe(1);
+    });
+  });
 });
