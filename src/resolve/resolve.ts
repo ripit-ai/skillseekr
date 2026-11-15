@@ -2,12 +2,13 @@ import { parseRegistriesFile } from '../config/load.js';
 import type { Ctx } from '../context.js';
 import { readGithubFile, type FetchOpts } from '../sources/github.js';
 import { fetchHttpText } from '../sources/http.js';
+import type { Policy } from '../policy/types.js';
 import type { Config, IncludeEntry, Problem, RegistriesFile, RegistryEntry, SourceEntry } from '../types.js';
 
 export interface ResolvedRegistry { name: string; entry: SourceEntry; via: string[]; trusted: boolean /* true iff declared directly in local config */ }
 export interface Override { kind: 'registry' | 'skill'; key: string; replaced: { registry: string; via: string[] }; by: { registry: string; via: string[] } }
 export interface IncludeInfo { name: string; via: string[]; entry: IncludeEntry; sha?: string; stale: boolean; policy: boolean /* entry.policy && depth===1 */ }
-export interface Resolution { registries: ResolvedRegistry[]; includes: IncludeInfo[]; overrides: Override[]; problems: Problem[]; stale: boolean }
+export interface Resolution { registries: ResolvedRegistry[]; includes: IncludeInfo[]; overrides: Override[]; problems: Problem[]; stale: boolean; policy: Policy }
 
 /** Effective TTL for one registry: 0 (re-check every load) when caching is off globally or for the entry. */
 export const ttlFor = (config: Pick<Config, 'cache'>, entry: { cache_enabled: boolean }): number =>
@@ -45,6 +46,10 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
   const overrides: Override[] = [];
   const hoisted = new Map<string, ResolvedRegistry>();
   let stale = false;
+  const policy: Policy = {
+    sources: [{ source: { kind: 'local', file: config.path }, allow: config.policy.allow, block: config.policy.block }],
+    trust: config.policy.trust,
+  };
 
   type Fetched = Awaited<ReturnType<typeof readGithubFile>> | Awaited<ReturnType<typeof fetchHttpText>>;
   type Loaded = Exclude<Fetched, { error: Problem }> & { sha?: string; parsed: RegistriesFile };
@@ -139,10 +144,24 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
       for (const p of parsed.problems) {
         problems.push({ ...p, registry: p.registry ?? name, via: p.registry ? [...via, p.registry] : via, file: p.file ?? file });
       }
+      const ignored = (key: 'allow' | 'block' | 'trust', code: string, rule: string): void => {
+        problems.push({
+          level: 'warning', code, registry: name, via, file,
+          message: `${key} entries in ${file} are ignored (${rule})`,
+        });
+      };
+      const honoured = entry.policy && depth === 1;
+      const pol = parsed.policy;
+      if (honoured) policy.sources.push({ source: { kind: 'include', name, via, file }, allow: pol.allow, block: pol.block });
+      else {
+        if (Object.keys(pol.allow).length > 0) ignored('allow', 'policy/ignored-allow', 'only the local config and policy:true includes from it may allow');
+        if (pol.block.length > 0) ignored('block', 'policy/ignored-block', 'only the local config and policy:true includes from it may block');
+      }
+      if (pol.trust.length > 0) ignored('trust', 'policy/ignored-trust', 'only the local config may set trust');
       await walk(parsed.registries, { trusted: false, depth, via, file, seen: new Set([...lvl.seen, id]) });
     }
   };
 
   await walk(config.registries, { trusted: true, depth: 0, via: [], file: config.path, seen: new Set() });
-  return { registries: [...hoisted.values()], includes, overrides, problems, stale };
+  return { registries: [...hoisted.values()], includes, overrides, problems, stale, policy };
 }

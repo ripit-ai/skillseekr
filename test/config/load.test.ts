@@ -86,7 +86,7 @@ describe('parseRegistriesFile', () => {
   });
 
   it('handles empty registries and a missing registries key', () => {
-    expect(parseRegistriesFile(`{"registries":{}}`, opts)).toEqual({ registries: [], problems: [] });
+    expect(parseRegistriesFile(`{"registries":{}}`, opts)).toEqual({ registries: [], problems: [], policy: { allow: {}, block: [], trust: [] } });
     expect(parseRegistriesFile(`{}`, opts).registries).toEqual([]);
   });
 });

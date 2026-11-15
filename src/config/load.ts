@@ -3,6 +3,8 @@ import { parseTree, getNodeValue, printParseErrorCode, type Node, type ParseErro
 import { z } from 'zod';
 import type { Auth, Config, Problem, RegistriesFile, RegistryEntry } from '../types.js';
 import type { Ctx } from '../context.js';
+import { parsePolicy } from '../policy/parse.js';
+import { emptyPolicyBlock as emptyPolicy } from '../policy/types.js';
 import { configPath, defaultCacheDir, expandHome } from '../paths.js';
 
 const authSchema = z.discriminatedUnion('type', [
@@ -72,21 +74,26 @@ export function parseRegistriesFile(text: string, opts: { file: string; isLocalC
 
 function parseInternal(text: string, opts: { file: string; isLocalConfig: boolean }): { root?: Node; file: RegistriesFile } {
   const { root, problems } = parseRoot(text, opts.file);
-  if (!root) return { file: { registries: [], problems } };
-  return { root, file: parseRegistries(root, problems, opts) };
+  if (!root) return { file: { registries: [], problems, policy: emptyPolicy() } };
+  const f = parseRegistries(root, problems, opts);
+  const pol = parsePolicy(root, opts.file);
+  f.problems.push(...pol.problems);
+  f.policy = pol.policy;
+  return { root, file: f };
 }
 
 function parseRegistries(root: Node, problems: Problem[], opts: { file: string; isLocalConfig: boolean }): RegistriesFile {
   const { file, isLocalConfig } = opts;
   if (root.type !== 'object') {
-    return { registries: [], problems: [{ level: 'error', code: 'config/parse-error', file, message: `${file}: top level must be an object (offset ${root.offset})` }] };
+    return { registries: [], problems: [{ level: 'error', code: 'config/parse-error', file, message: `${file}: top level must be an object (offset ${root.offset})` }], policy: emptyPolicy() };
   }
   const regs = child(root, 'registries');
   const registries: Array<[string, RegistryEntry]> = [];
-  if (!regs) return { registries, problems };
+  const policy = emptyPolicy();
+  if (!regs) return { registries, problems, policy };
   if (regs.type !== 'object') {
     problems.push({ level: 'error', code: 'config/invalid-entry', file, message: `${file}: "registries" must be an object` });
-    return { registries, problems };
+    return { registries, problems, policy };
   }
   for (const prop of regs.children ?? []) {
     const name = String(prop.children?.[0]?.value);
@@ -105,7 +112,7 @@ function parseRegistries(root: Node, problems: Problem[], opts: { file: string; 
     if (!isLocalConfig && (entry.type === 'github-registry' || entry.type === 'http-registry')) entry.policy = false;
     registries.push([name, entry]);
   }
-  return { registries, problems };
+  return { registries, problems, policy };
 }
 
 export async function loadConfig(ctx: Ctx): Promise<Config> {
@@ -118,7 +125,7 @@ export async function loadConfig(ctx: Ctx): Promise<Config> {
     const err = e as NodeJS.ErrnoException;
     const missing = err.code === 'ENOENT' || err.code === 'ENOTDIR';
     return {
-      path, exists: false, registries: [], cache: defaults,
+      path, exists: false, registries: [], policy: emptyPolicy(), cache: defaults,
       problems: [{
         level: 'error', code: missing ? 'config/missing' : 'config/unreadable', file: path,
         message: missing ? `Config file not found: ${path} (run \`skillseekr setup\`)` : `Cannot read config ${path}: ${err.message}`,
@@ -138,5 +145,5 @@ export async function loadConfig(ctx: Ctx): Promise<Config> {
       file.problems.push({ level: 'error', code: 'config/invalid-entry', file: path, message: `${path}: invalid "cache" section (${c.error.issues.map((i) => i.message).join('; ')})` });
     }
   }
-  return { path, exists: true, registries: file.registries, problems: file.problems, cache };
+  return { path, exists: true, registries: file.registries, problems: file.problems, policy: file.policy, cache };
 }

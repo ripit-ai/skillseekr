@@ -1,6 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import { basename, extname, join } from 'node:path';
 import { parseFrontmatter } from './catalog/frontmatter.js';
+import { emptyPolicyBlock } from './policy/types.js';
 import { parseRegistriesFile } from './config/load.js';
 import type { Ctx } from './context.js';
 import { defaultCacheDir } from './paths.js';
@@ -59,7 +60,7 @@ async function validateRegistriesFile(file: string, ctx: Ctx): Promise<Problem[]
   if (problems.some((p) => p.code === 'config/parse-error')) return problems;
 
   const config: Config = {
-    path: file, exists: true, registries: kept, problems: [],
+    path: file, exists: true, registries: kept, problems: [], policy: emptyPolicyBlock(),
     cache: { enabled: true, ttlSeconds: 3600, dir: defaultCacheDir(ctx) },
   };
   // An empty env as a second guard: nothing resolved here may read the caller's environment.

@@ -303,3 +303,120 @@ describe('resolve', () => {
     expect(r.problems[0].message).toContain('kaboom');
   });
 });
+
+describe('resolve policy', () => {
+  const H = `sha256:${'b'.repeat(64)}`;
+  const KEY = `ed25519:${'A'.repeat(43)}`;
+  const allowOf = (n: string) => ({ [n]: { content_hash: H, rules: ['r/1'], reason: 'why', added: '2026-11-14' } });
+  const blockOf = (id: string) => [{ id, reason: 'bad', added: '2026-11-20' }];
+  const trustOf = (o: string) => [{ owner: o, public_keys: [KEY] }];
+  const policyKeys = (n: string) => ({ allow: allowOf(n), block: blockOf(n), trust: trustOf(n) });
+  const codes = (r: { problems: Array<{ code: string }> }) => r.problems.map((p) => p.code);
+
+  /** Builds a config whose local file also carries the given policy keys. */
+  async function withLocal(local: Entries, extra: Record<string, unknown>, repos: FakeSpec) {
+    const s = await setup({ local, repos });
+    const parsed = parseRegistriesFile(file(local, extra), { file: s.config.path, isLocalConfig: true });
+    return { ...s, config: { ...s.config, ...parsed } };
+  }
+
+  it('local allow/block/trust are honoured', async () => {
+    const { config, ctx } = await withLocal({}, policyKeys('loc'), {});
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.problems).toEqual([]);
+    expect(r.policy.trust).toEqual(trustOf('loc'));
+    expect(r.policy.sources).toEqual([{ source: { kind: 'local', file: config.path }, allow: allowOf('loc'), block: blockOf('loc') }]);
+  });
+
+  it('no policy keys gives one empty local source', async () => {
+    const { config, ctx } = await setup({ local: {} });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.policy).toEqual({ sources: [{ source: { kind: 'local', file: config.path }, allow: {}, block: [] }], trust: [] });
+  });
+
+  it('policy:true depth-1 include contributes allow and block with source {kind:include, name}', async () => {
+    const { config, ctx } = await withLocal({ P: ghInclude('p', { policy: true }) }, policyKeys('loc'), {
+      'o/p': repoWith({}, { allow: allowOf('pol'), block: blockOf('pol') }),
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.problems).toEqual([]);
+    expect(r.policy.sources).toHaveLength(2);
+    expect(r.policy.sources[0]?.source.kind).toBe('local');
+    expect(r.policy.sources[1]).toEqual({
+      source: { kind: 'include', name: 'P', via: ['P'], file: 'github:o/p@main:registries.jsonc' },
+      allow: allowOf('pol'), block: blockOf('pol'),
+    });
+    expect(r.policy.trust).toEqual(trustOf('loc'));
+  });
+
+  it('allow/block in a non-policy include are ignored and reported', async () => {
+    const { config, ctx } = await setup({
+      local: { N: ghInclude('n') },
+      repos: { 'o/n': repoWith({}, { allow: allowOf('n'), block: blockOf('n') }) },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.policy.sources).toHaveLength(1);
+    expect(codes(r)).toEqual(['policy/ignored-allow', 'policy/ignored-block']);
+    expect(r.problems[0]).toMatchObject({
+      level: 'warning', registry: 'N', via: ['N'], file: 'github:o/n@main:registries.jsonc',
+      message: 'allow entries in github:o/n@main:registries.jsonc are ignored (only the local config and policy:true includes from it may allow)',
+    });
+  });
+
+  it('warns once per key per file, not per entry', async () => {
+    const two = { ...allowOf('a'), ...allowOf('b') };
+    const { config, ctx } = await setup({
+      local: { N: ghInclude('n') },
+      repos: { 'o/n': repoWith({}, { allow: two, block: [...blockOf('a'), ...blockOf('b')] }) },
+    });
+    expect(codes(await resolve(config, { force: false }, ctx))).toEqual(['policy/ignored-allow', 'policy/ignored-block']);
+  });
+
+  it('allow/block in a depth-2 include under a policy include are ignored and reported', async () => {
+    const { config, ctx } = await setup({
+      local: { P: ghInclude('p', { policy: true }) },
+      repos: {
+        'o/p': repoWith({ D: ghInclude('d', { policy: true }) }),
+        'o/d': repoWith({}, { allow: allowOf('d'), block: blockOf('d') }),
+      },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.policy.sources).toHaveLength(2);
+    expect(r.policy.sources.every((s) => Object.keys(s.allow).length === 0 && s.block.length === 0)).toBe(true);
+    expect(codes(r)).toEqual(['policy/ignored-allow', 'policy/ignored-block']);
+    expect(r.problems[0]).toMatchObject({ registry: 'D', via: ['P', 'D'], file: 'github:o/d@main:registries.jsonc' });
+  });
+
+  it('trust in any included file is ignored and reported', async () => {
+    const { config, ctx } = await setup({
+      local: { P: ghInclude('p', { policy: true }), N: ghInclude('n') },
+      repos: { 'o/p': repoWith({}, { trust: trustOf('p') }), 'o/n': repoWith({}, { trust: trustOf('n') }) },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.policy.trust).toEqual([]);
+    expect(codes(r)).toEqual(['policy/ignored-trust', 'policy/ignored-trust']);
+    expect(r.problems.map((p) => p.registry)).toEqual(['P', 'N']);
+  });
+
+  it('policy:true in an included file has no effect', async () => {
+    const { config, ctx } = await setup({
+      local: { P: ghInclude('p', { policy: true }) },
+      repos: {
+        'o/p': repoWith({ D: ghInclude('d', { policy: true }) }),
+        'o/d': repoWith({}, { block: blockOf('d') }),
+      },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.includes.map((i) => [i.name, i.policy])).toEqual([['P', true], ['D', false]]);
+    expect(r.policy.sources.map((s) => s.source.kind)).toEqual(['local', 'include']);
+  });
+
+  it('invalid policy entries in an include are reported with registry and via', async () => {
+    const { config, ctx } = await setup({
+      local: { P: ghInclude('p', { policy: true }) },
+      repos: { 'o/p': repoWith({}, { block: [{ id: 'x' }] }) },
+    });
+    const r = await resolve(config, { force: false }, ctx);
+    expect(r.problems).toMatchObject([{ code: 'policy/invalid-entry', level: 'error', registry: 'P', via: ['P'] }]);
+  });
+});

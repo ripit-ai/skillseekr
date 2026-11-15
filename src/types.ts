@@ -1,3 +1,5 @@
+import type { PolicyBlock } from './policy/types.js';
+
 export type Auth =
   | { type: 'none' }
   | { type: 'github_token'; env_var: string }
@@ -32,6 +34,7 @@ export interface Problem {
 export interface RegistriesFile {
   registries: Array<[name: string, entry: RegistryEntry]>;
   problems: Problem[];
+  policy: PolicyBlock;
 }
 export interface CacheSettings { enabled: boolean; ttlSeconds: number; dir: string /* absolute */ }
 export interface Config extends RegistriesFile { path: string; exists: boolean; cache: CacheSettings }
