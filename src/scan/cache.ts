@@ -23,7 +23,8 @@ const isScanResult = (v: unknown): v is ScanResult => {
 };
 
 /**
- * The cached scan for `contentHash` ("sha256:<hex>"), else `scan()`, stored at `<cacheDir>/scan/<version>/<hex>.json`.
+ * The cached scan for `contentHash` ("sha256:<hex>"), else `scan()`, stored as `{ contentHash, result }` at
+ * `<cacheDir>/scan/<version>/<hex>.json`; an entry whose contentHash differs from its key is rescanned.
  * A missing, unreadable or malformed entry is rescanned. A hash that isn't sha256 hex is never used as a path (no
  * caching). Writes are atomic and best effort: a failure is swallowed.
  */
@@ -32,10 +33,11 @@ export async function cachedScan(cacheDir: string, contentHash: string, scan: ()
   if (!HEX.test(hex)) return scan();
   const file = join(cacheDir, 'scan', version, `${hex}.json`);
   try {
-    const parsed: unknown = JSON.parse(await readFile(file, 'utf8'));
-    if (isScanResult(parsed)) return parsed;
+    const parsed = JSON.parse(await readFile(file, 'utf8')) as { contentHash?: unknown; result?: unknown } | null;
+    // The entry names the hash it was made for, so a file copied or renamed to another key is not trusted.
+    if (parsed?.contentHash === contentHash && isScanResult(parsed.result)) return parsed.result;
   } catch { /* missing or unreadable: rescan */ }
-  const result = await scan();
-  await writeCacheFile(file, JSON.stringify(result)).catch(() => {});
+  const result = await scan(); // a throw propagates and nothing is cached
+  await writeCacheFile(file, JSON.stringify({ contentHash, result })).catch(() => {});
   return result;
 }

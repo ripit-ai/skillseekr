@@ -2,16 +2,16 @@ import { createHash, randomBytes } from 'node:crypto';
 import { lstat, open, readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Ctx } from './context.js';
-import { Catalog, type CatalogSkill } from './catalog/catalog.js';
+import { Catalog } from './catalog/catalog.js';
 import { discoverSkills, type DiscoveredSkill } from './catalog/discover.js';
 import { loadConfig } from './config/load.js';
 import { MAX_FILE_BYTES } from './catalog/limits.js';
 import { configPath } from './paths.js';
-import { evaluate } from './policy/evaluate.js';
+import { evaluate, type Security } from './policy/evaluate.js';
 import { EMPTY_POLICY, type Policy } from './policy/types.js';
 import { cachedScan } from './scan/cache.js';
 import { qualityFindings } from './scan/quality.js';
-import { scanSkillDir, type Finding } from './scan/scan.js';
+import { UNSCANNABLE_RULE, scanSkillDir, type Finding } from './scan/scan.js';
 import { SIGNATURE_FILE, verifySkillDir } from './sign/sign.js';
 import { readState, writeCacheFile } from './cache/state.js';
 import { resolve, ttlFor, type IncludeInfo, type Override, type ResolvedRegistry } from './resolve/resolve.js';
@@ -76,6 +76,10 @@ async function readSkillMd(dir: string): Promise<string> {
   } catch { return ''; }
 }
 
+/** A discovered skill with its verdict: the engine never hands the catalog a skill without one. */
+type SecuredSkill = DiscoveredSkill & { security: Security };
+
+const CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
 const MAX_CHANGED_NAMES = 10;
 
 function signatureFinding(r: { changed: string[]; error?: string }): Finding {
@@ -91,7 +95,7 @@ const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 function validSkills(v: unknown): v is DiscoveredSkill[] {
   return Array.isArray(v) && v.every((s) => s && typeof s === 'object'
     && typeof s.id === 'string' && typeof s.name === 'string' && typeof s.description === 'string'
-    && typeof s.dir === 'string' && typeof s.contentHash === 'string'
+    && typeof s.dir === 'string' && typeof s.contentHash === 'string' && CONTENT_HASH_RE.test(s.contentHash)
     && Array.isArray(s.files) && Array.isArray(s.warnings));
 }
 
@@ -103,17 +107,23 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
    * Scan (cached by content hash and rules version) + quality + signature (only for a github owner the local config
    * trusts), then the block/allow verdict. Skills in one registry are checked one at a time.
    */
-  async function secure(skills: DiscoveredSkill[], entry: SourceEntry, policy: Policy, cacheDir: string): Promise<CatalogSkill[]> {
+  async function secure(skills: DiscoveredSkill[], entry: SourceEntry, policy: Policy, cacheDir: string): Promise<SecuredSkill[]> {
     const keys = entry.type === 'github'
       ? policy.trust.filter((t) => t.owner.toLowerCase() === entry.owner.toLowerCase()).flatMap((t) => t.public_keys)
       : [];
-    const out: CatalogSkill[] = [];
+    const out: SecuredSkill[] = [];
     for (const s of skills) {
-      const scanned = await cachedScan(cacheDir, s.contentHash, () => scan(s.dir, s.files));
-      const findings = [...scanned.findings, ...await qualityFindings(s, await readSkillMd(s.dir))];
-      if (keys.length > 0) {
-        const v = await verifySkillDir(s.dir, s.files, keys);
-        if (!v.ok) findings.push(signatureFinding(v));
+      const findings: Finding[] = [];
+      try {
+        findings.push(...(await cachedScan(cacheDir, s.contentHash, () => scan(s.dir, s.files))).findings);
+        findings.push(...await qualityFindings(s, await readSkillMd(s.dir)));
+        if (keys.length > 0) {
+          const v = await verifySkillDir(s.dir, s.files, keys);
+          if (!v.ok) findings.push(signatureFinding(v));
+        }
+      } catch (e) {
+        // Fail closed for this skill only; its siblings and the registry still load. Not cached, so it is retried.
+        findings.push({ rule: UNSCANNABLE_RULE, severity: 'critical', file: 'SKILL.md', line: 1, message: `scan failed: ${msg(e)}` });
       }
       out.push({ ...s, security: evaluate(s, findings, policy) });
     }
@@ -140,7 +150,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
       ttlSeconds: ttlFor(config, entry),
     };
     const problems: Problem[] = [];
-    let skills: CatalogSkill[] = [];
+    let skills: SecuredSkill[] = [];
     let sha: string | undefined;
     let stale = false;
     let cacheAgeSeconds: number | undefined;

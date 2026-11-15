@@ -131,6 +131,8 @@ export class Catalog {
     if (!st) return { kind: 'refused', reason: 'empty path' };
     if (st.isDirectory()) return { kind: 'refused', reason: 'path is a directory' };
     if (!st.isFile()) return { kind: 'refused', reason: 'not a regular file' };
+    // Only files that were listed (and so hashed and scanned) are served: e.g. a fetched root .skillseekr.json is not.
+    if (!skill.files.includes(parts.join('/'))) return { kind: 'refused', reason: 'file is not part of the scanned skill' };
     if (st.size > MAX_FILE_BYTES) return { kind: 'too_large', size: st.size, path: target };
 
     try {
