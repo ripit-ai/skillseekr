@@ -3,14 +3,16 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import type { Ctx } from '../context.js';
 import type { Catalog, SkillRecord } from '../catalog/catalog.js';
 import { contentHash } from '../catalog/hash.js';
+import { blockReason, securityOfInstalled } from './security.js';
+import type { Security } from '../policy/evaluate.js';
 import { PROJECT_SKILLS_DIR, TOOL_IDS, TOOL_TARGETS, presentTools, type Scope, type ToolId } from './targets.js';
 
 export interface Marker { id: string; name: string; registry: string; via: string[]; ref?: string; sha?: string; contentHash: string; installedAt: string }
-export interface Installed { name: string; scope: Scope; dir: string; tool?: ToolId; marker: Marker; modified: boolean }
-export type InstallStatus = 'current' | 'outdated' | 'modified' | 'missing-from-catalog';
+export interface Installed { name: string; scope: Scope; dir: string; tool?: ToolId; marker: Marker; modified: boolean; security?: Security }
+export type InstallStatus = 'current' | 'outdated' | 'modified' | 'missing-from-catalog' | 'blocked';
 export type UpdateResult =
   | { name: string; dir: string; result: 'updated' | 'current' | 'skipped-modified' | 'missing-from-catalog' }
-  | { name: string; dir: string; result: 'failed'; message: string };
+  | { name: string; dir: string; result: 'failed' | 'blocked'; message: string };
 
 const MARKER_FILE = '.skillseekr.json';
 
@@ -18,7 +20,7 @@ const MARKER_FILE = '.skillseekr.json';
 export const fsHooks = { rename };
 
 export class InstallError extends Error {
-  constructor(public code: 'name-conflict' | 'unmanaged-folder' | 'not-installed', message: string) {
+  constructor(public code: 'name-conflict' | 'unmanaged-folder' | 'not-installed' | 'blocked', message: string) {
     super(message);
     this.name = 'InstallError';
   }
@@ -115,6 +117,9 @@ async function installInto(skill: SkillRecord, parent: string, folder: string, c
  * `tools` in the result lists the tools that will load the install: all of them for project scope.
  */
 export async function installSkill(skill: SkillRecord, scope: Scope, ctx: Ctx, opts?: { projectDir?: string; tools?: ToolId[] }): Promise<{ dirs: string[]; tools: ToolId[] }> {
+  if (skill.security.status === 'blocked') {
+    throw new InstallError('blocked', `Skill "${skill.id}" is blocked (${blockReason(skill.security)}); it cannot be installed.`);
+  }
   validateName(skill.name);
   const targets: Target[] = scope === 'project'
     ? [{ dir: projectRoot(ctx, opts) }]
@@ -138,7 +143,7 @@ function scanTargets(ctx: Ctx, scope: Scope | undefined, opts?: { projectDir?: s
   return out;
 }
 
-export async function listInstalled(ctx: Ctx, opts?: { scope?: Scope; projectDir?: string }): Promise<Installed[]> {
+export async function listInstalled(ctx: Ctx, opts?: { scope?: Scope; projectDir?: string; catalog?: Catalog }): Promise<Installed[]> {
   const out: Installed[] = [];
   for (const t of scanTargets(ctx, opts?.scope, opts)) {
     let entries;
@@ -151,7 +156,9 @@ export async function listInstalled(ctx: Ctx, opts?: { scope?: Scope; projectDir
       if (!marker) continue;
       let modified = true;
       try { modified = (await contentHash(dir)).hash !== marker.contentHash; } catch { /* unreadable: treat as modified */ }
-      out.push({ name: marker.name, scope: t.scope, dir, ...(t.tool && { tool: t.tool }), marker, modified });
+      const item: Installed = { name: marker.name, scope: t.scope, dir, ...(t.tool && { tool: t.tool }), marker, modified };
+      if (opts?.catalog) item.security = await securityOfInstalled(item, opts.catalog, ctx);
+      out.push(item);
     }
   }
   return out;
@@ -198,8 +205,23 @@ export async function updateInstalled(
     const status = statusOf(i, catalog);
     const skill = catalog.byId(i.marker.id);
     if (status === 'missing-from-catalog' || !skill) { out.push({ ...base, result: 'missing-from-catalog' }); continue; }
-    if (status === 'modified' && !opts.force) { out.push({ ...base, result: 'skipped-modified' }); continue; }
-    if (status === 'current') { out.push({ ...base, result: 'current' }); continue; }
+    // Order: a blocked catalog version is never installed and the copy is left alone. Next, a copy that stays as it
+    // is (current, or modified without --force) is rescanned and reported blocked if it is. A copy about to be
+    // replaced by a clean catalog version is not reported: the replacement fixes it.
+    if (skill.security.status === 'blocked') {
+      out.push({ ...base, result: 'blocked', message: `catalog version is blocked (${blockReason(skill.security)}); the installed copy was left unchanged` });
+      continue;
+    }
+    const stays = status === 'current' || (status === 'modified' && !opts.force);
+    if (stays) {
+      const sec = await securityOfInstalled(i, catalog, ctx);
+      if (sec.status === 'blocked') {
+        out.push({ ...base, result: 'blocked', message: `installed copy is blocked (${blockReason(sec)})` });
+        continue;
+      }
+      out.push({ ...base, result: status === 'current' ? 'current' : 'skipped-modified' });
+      continue;
+    }
     try {
       await installInto(skill, dirname(i.dir), basename(i.dir), ctx);
       out.push({ ...base, result: 'updated' });

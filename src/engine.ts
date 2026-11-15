@@ -208,7 +208,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
         ...(r.reg.entry.type === 'github' ? { ref: r.reg.entry.ref } : {}),
         ...(r.sha !== undefined ? { sha: r.sha } : {}),
       })),
-      res.overrides, problems, stale, res.policy,
+      res.overrides, problems, stale, res.policy, config.cache.dir,
     );
 
     const views: RegistryView[] = results.map((r) => {

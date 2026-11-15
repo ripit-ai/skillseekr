@@ -43,6 +43,8 @@ export class Catalog {
   readonly problems: Problem[];
   readonly stale: boolean;
   readonly policy: Policy;
+  /** Where scan results are cached, when the engine built this catalog; installed-copy scans use it. */
+  readonly cacheDir?: string;
   private readonly ids = new Map<string, SkillRecord>();
   private index?: Bm25Index;
   /** Skills search may return: everything but blocked ones, which are also left out of the index. */
@@ -50,7 +52,7 @@ export class Catalog {
 
   constructor(
     perRegistry: Array<{ registry: ResolvedRegistry; ref?: string; sha?: string; skills: CatalogSkill[] }>,
-    overrides: Override[], problems: Problem[], stale: boolean, policy: Policy = EMPTY_POLICY,
+    overrides: Override[], problems: Problem[], stale: boolean, policy: Policy = EMPTY_POLICY, cacheDir?: string,
   ) {
     const skillOverrides: Override[] = [];
     for (const r of perRegistry) {
@@ -76,6 +78,7 @@ export class Catalog {
     this.problems = problems;
     this.stale = stale;
     this.policy = policy;
+    if (cacheDir !== undefined) this.cacheDir = cacheDir;
     this.searchable = this.skills.filter((s) => s.security.status !== 'blocked');
   }
 

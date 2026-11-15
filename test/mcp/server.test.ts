@@ -151,7 +151,7 @@ describe('mcp server', () => {
     const l = await s.call('list_installed', { scope: 'project' });
     expect(l.data.installed).toEqual([{
       name: 'alpha', scope: 'project', dir: join(s.project, '.claude', 'skills', 'alpha'),
-      id: 'alpha', registry: 'one', via: ['one'], status: 'current',
+      id: 'alpha', registry: 'one', via: ['one'], status: 'current', security: 'warned',
     }]);
   });
 

@@ -17,7 +17,7 @@ export function registerUpdate(program: Command, cli: Cli): void {
         cli.io.err("hint: some installed skills are no longer in the catalog (registry removed, renamed or failing); check 'skillseekr registries'\n");
       }
       const failed = results.filter((r) => r.result === 'failed');
-      for (const f of failed) cli.io.err(`${f.name}: ${f.message} (${f.dir})\n`);
+      for (const f of results) if (f.result === 'failed' || f.result === 'blocked') cli.io.err(`${f.name}: ${f.message} (${f.dir})\n`);
       const failure = failed.length > 0 ? new CliError(`${failed.length} skill(s) failed to update`) : undefined;
       if (isJson(cmd)) printJson(cli.io, { results, stale: catalog.stale });
       else if (results.length === 0) cli.io.out('no skills installed\n');

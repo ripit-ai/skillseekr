@@ -143,11 +143,12 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
     { scope: z.enum(['project', 'user']).optional() },
     async ({ scope }) => {
       const c = await engine.catalog();
-      const items = await listInstalled(ctx, { ...(scope && { scope }), projectDir: await projectDir() });
+      const items = await listInstalled(ctx, { ...(scope && { scope }), projectDir: await projectDir(), catalog: c });
       return ok({
         installed: items.map((i) => ({
           name: i.name, scope: i.scope, dir: i.dir, tool: i.tool, id: i.marker.id,
           registry: i.marker.registry, via: i.marker.via, status: statusOf(i, c),
+          ...(i.security && { security: i.security.status }),
         })),
         problems: errorsOf(c.problems),
       });
