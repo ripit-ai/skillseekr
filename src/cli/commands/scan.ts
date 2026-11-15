@@ -7,7 +7,7 @@ import { CliError, findingLine, isJson, printJson, type Cli } from '../output.js
 export function registerScan(program: Command, cli: Cli): void {
   program.command('scan [dir...]')
     .description('scan skill folders for security and quality problems (default: project, tool and plugin skill folders)')
-    .option('--gate <level>', 'exit 1 on any critical finding (critical) or any finding at all (warning)')
+    .option('--gate <level>', 'exit 1 on any critical security finding (critical) or any security finding at all (warning); quality findings never gate')
     .action(async (dirs: string[], opts: { gate?: string }, cmd: Command) => {
       if (opts.gate !== undefined && opts.gate !== 'critical' && opts.gate !== 'warning') throw new CliError('--gate must be "critical" or "warning"');
       const config = await cli.engine().config();
@@ -25,6 +25,7 @@ export function registerScan(program: Command, cli: Cli): void {
         for (const r of results) {
           cli.io.out(`${r.status.toUpperCase()}  ${r.skill}  (${r.target})  ${r.dir}\n`);
           for (const f of r.findings) cli.io.out(`  [${f.severity}] ${findingLine(f)}\n`);
+          for (const f of r.quality) cli.io.out(`  [quality] ${findingLine(f)}\n`);
         }
       }
       const crit = results.filter((r) => r.status === 'critical').length;

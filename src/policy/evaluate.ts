@@ -4,7 +4,7 @@ import type { AllowEntry, BlockEntry, Policy, PolicySource } from './types.js';
 export type SecurityStatus = 'clean' | 'warned' | 'allowed' | 'blocked';
 export interface Security {
   status: SecurityStatus;
-  findings: Finding[]; // scan + quality + integrity, all of them
+  findings: Finding[]; // scan + integrity (P2-R20: quality findings are kept apart, on SkillRecord.quality)
   blockedBy?: { kind: 'scan'; rules: string[] } | { kind: 'deny'; entry: BlockEntry; source: PolicySource };
   allowedBy?: { label: string /* 'user' | include name */; rules: string[]; added: string; reason: string };
   note?: string; // e.g. why a present allow entry didn't apply

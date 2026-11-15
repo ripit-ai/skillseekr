@@ -69,7 +69,7 @@ export async function starterSkill(): Promise<SkillRecord> {
   const { hash, files } = await contentHash(dir);
   return {
     id: STARTER_NAME, name: STARTER_NAME, description: String(fm.data.description ?? ''),
-    dir, files, contentHash: hash, warnings: [], registry: 'builtin', via: [], security: CLEAN, // shipped with skillseekr
+    dir, files, contentHash: hash, warnings: [], registry: 'builtin', via: [], security: CLEAN, quality: [], // shipped with skillseekr
   };
 }
 

@@ -58,6 +58,22 @@ describe('qualityFindings rules', () => {
     expect(rules(await qualityFindings({ description: 'Use when testing.', dir, files }, '# x'))).toContain('quality/description-short');
   });
 
+  it('P2-R20: the starter skill gets no quality findings; at/before/whenever/during and "when working" are triggers', async () => {
+    for (const tree of ['assets', 'plugins/skillseekr/skills']) {
+      const s = (await discoverSkills(join(root, tree), ''))[0]!;
+      expect(s.description).toMatch(/^Use at the start of any specialized task/);
+      expect(await qualityFindings({ description: s.description, dir: s.dir, files: s.files }, await readFile(join(s.dir, 'SKILL.md'), 'utf8')), tree).toEqual([]);
+    }
+    const { dir, files } = await tmp({ 'SKILL.md': '# x' });
+    const r = async (d: string) => rules(await qualityFindings({ description: d, dir, files }, '# x'));
+    for (const d of [
+      'Use before merging a pull request that touches database migrations.', 'Use whenever a deploy pipeline reports flaky integration tests.',
+      'Use it during incident review to collect timelines from chat logs.', 'Collects timelines from chat logs when working on incident reviews.',
+      'Collects timelines from chat logs when the task is an incident review.', 'Use this at the end of a sprint to draft release notes.',
+    ]) expect(await r(d), d).not.toContain('quality/description-no-trigger');
+    expect(await r('Collects timelines from chat logs for incident reviews and postmortems.')).toContain('quality/description-no-trigger');
+  });
+
   it('flags hijack phrases and generic descriptions, not specific ones', async () => {
     const { dir, files } = await tmp({ 'SKILL.md': '# x' });
     const r = async (d: string) => rules(await qualityFindings({ description: d, dir, files }, '# x'));

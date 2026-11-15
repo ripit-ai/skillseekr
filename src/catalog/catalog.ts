@@ -7,10 +7,12 @@ import { CLEAN, type Security, type SecurityStatus } from '../policy/evaluate.js
 import { EMPTY_POLICY, type Policy } from '../policy/types.js';
 import { Bm25Index } from './search.js';
 import { MAX_FILE_BYTES, SNIFF_BYTES } from './limits.js';
+import type { Finding } from '../scan/scan.js';
 
-export interface SkillRecord extends DiscoveredSkill { registry: string; via: string[]; ref?: string; sha?: string; instructions?: string; security: Security }
-/** A discovered skill with its verdict; a skill without one is CLEAN (catalogs built directly, as in Phase 1 tests). */
-export type CatalogSkill = DiscoveredSkill & { security?: Security };
+/** `quality`: skill-quality findings (`quality/*`), never part of `security` (P2-R20). */
+export interface SkillRecord extends DiscoveredSkill { registry: string; via: string[]; ref?: string; sha?: string; instructions?: string; security: Security; quality: Finding[] }
+/** A discovered skill with its verdict; a skill without one is CLEAN with no quality findings (catalogs built directly, as in Phase 1 tests). */
+export type CatalogSkill = DiscoveredSkill & { security?: Security; quality?: Finding[] };
 export type Lookup = { kind: 'found'; skill: SkillRecord } | { kind: 'ambiguous'; ids: string[] } | { kind: 'missing' };
 export type FileRead =
   | { kind: 'text'; content: string }
@@ -21,6 +23,8 @@ export interface SearchHit {
   id: string; name: string; description: string; registry: string; via: string[]; score: number;
   overrode: Array<{ registry: string; via: string[] }>;
   security: { status: SecurityStatus; allowedBy?: string; warnings: number };
+  /** Number of quality findings (P2-R20); not security warnings. */
+  quality: number;
 }
 
 /** Why a blocked skill is refused: the deny entry's reason, or the first critical finding's rule and place. */
@@ -66,7 +70,7 @@ export class Catalog {
             by: { registry: r.registry.name, via: r.registry.via },
           });
         }
-        const rec: SkillRecord = { ...s, registry: r.registry.name, via: r.registry.via, security: s.security ?? CLEAN };
+        const rec: SkillRecord = { ...s, registry: r.registry.name, via: r.registry.via, security: s.security ?? CLEAN, quality: s.quality ?? [] };
         if (r.ref !== undefined) rec.ref = r.ref;
         if (r.sha !== undefined) rec.sha = r.sha;
         if (instructions !== undefined) rec.instructions = instructions;
@@ -170,6 +174,7 @@ export class Catalog {
             ...(s.security.allowedBy ? { allowedBy: s.security.allowedBy.label } : {}),
             warnings: s.security.findings.filter((f) => f.severity === 'warning').length,
           },
+          quality: s.quality.length,
         });
       }
     });

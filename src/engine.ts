@@ -63,7 +63,7 @@ async function generationStamp(file: string): Promise<string> {
 }
 
 /** A discovered skill with its verdict: the engine never hands the catalog a skill without one. */
-type SecuredSkill = DiscoveredSkill & { security: Security };
+type SecuredSkill = DiscoveredSkill & { security: Security; quality: Finding[] };
 
 const CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
 const MAX_CHANGED_NAMES = 10;
@@ -90,8 +90,8 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
   const scan = deps.scan ?? scanSkillDir;
 
   /**
-   * Scan (cached by content hash and rules version) + quality + signature (only for a github owner the local config
-   * trusts), then the block/allow verdict. Skills in one registry are checked one at a time.
+   * Scan (cached by content hash and rules version) + signature (only for a github owner the local config trusts),
+   * then the block/allow verdict. Quality findings are computed alongside but never feed the verdict (P2-R20). Skills in one registry are checked one at a time.
    */
   async function secure(skills: DiscoveredSkill[], entry: SourceEntry, policy: Policy, cacheDir: string): Promise<SecuredSkill[]> {
     const keys = entry.type === 'github'
@@ -100,9 +100,10 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
     const out: SecuredSkill[] = [];
     for (const s of skills) {
       const findings: Finding[] = [];
+      let quality: Finding[] = [];
       try {
         findings.push(...(await cachedScan(cacheDir, s.contentHash, () => scan(s.dir, s.files))).findings);
-        findings.push(...await qualityFindings(s, await readSkillMd(s.dir)));
+        quality = await qualityFindings(s, await readSkillMd(s.dir));
         if (keys.length > 0) {
           const v = await verifySkillDir(s.dir, s.files, keys);
           if (!v.ok) findings.push(signatureFinding(v));
@@ -111,7 +112,7 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
         // Fail closed for this skill only; its siblings and the registry still load. Not cached, so it is retried.
         findings.push({ rule: UNSCANNABLE_RULE, severity: 'critical', file: 'SKILL.md', line: 1, message: `scan failed: ${msg(e)}` });
       }
-      out.push({ ...s, security: evaluate(s, findings, policy) });
+      out.push({ ...s, security: evaluate(s, findings, policy), quality });
     }
     return out;
   }

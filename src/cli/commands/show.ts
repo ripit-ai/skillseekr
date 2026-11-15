@@ -16,7 +16,7 @@ export function registerShow(program: Command, cli: Cli): void {
       if (isJson(cmd)) {
         return printJson(cli.io, {
           id: s.id, name: s.name, description: s.description, registry: s.registry, via: s.via,
-          ref: s.ref, sha: s.sha, overrides, files: s.files, warnings: s.warnings, security: sec,
+          ref: s.ref, sha: s.sha, overrides, files: s.files, warnings: s.warnings, security: sec, quality: s.quality,
           ...(meta ? { skillMd: meta } : sec.status === 'blocked' ? {} : { body }),
           stale: catalog.stale, problems: catalog.problems.filter((p) => p.level === 'error'),
         });
@@ -35,6 +35,7 @@ export function registerShow(program: Command, cli: Cli): void {
       if (sec.allowedBy) out.push(`  allowed by: ${sec.allowedBy.label} (added ${sec.allowedBy.added}; rules: ${sec.allowedBy.rules.join(', ')}; reason: ${sec.allowedBy.reason})`);
       if (sec.note) out.push(`  note: ${sec.note}`);
       for (const x of sec.findings) out.push(`  [${x.severity}] ${findingLine(x)}`);
+      if (s.quality.length > 0) out.push('', 'Quality:', ...s.quality.map((x) => `  ${findingLine(x)}`));
       out.push('');
       if (sec.status === 'blocked') out.push('SKILL.md: not shown (the skill is blocked)', '');
       else if (meta) out.push(`SKILL.md: ${meta.kind === 'binary' ? 'binary' : 'too large'} (${meta.size} bytes); read it at ${meta.path}`, '');

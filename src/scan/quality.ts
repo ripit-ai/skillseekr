@@ -10,7 +10,7 @@ const STOPWORDS = new Set([
   'that', 'the', 'this', 'to', 'use', 'when', 'with', 'you', 'your',
 ]);
 
-const TRIGGER = /\b(use (this |it )?(when|for|to|if)|when (the user|you|asked)|for (tasks|requests|work) (that|involving|about))\b/i;
+const TRIGGER = /\b(use (this |it )?(when|for|to|if|at|before|whenever|during)|when (the user|you|asked|working|the task)|for (tasks|requests|work) (that|involving|about))\b/i;
 const HIJACK = /\b(every|any|all) (task|request|question)s?\b|\balways use\b|\buse (this|it) (for|on) everything\b/i;
 const BACKTICK_PATH = /^(references|scripts|templates|assets|examples)\/[\w./-]+$/;
 const MIN_DESCRIPTION = 40;

@@ -102,6 +102,8 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
           warnings: s.security.findings.filter((x) => x.severity === 'warning'),
           ...(s.security.allowedBy && { allowedRules: s.security.allowedBy.rules }),
         },
+        // Skill-quality notes (P2-R20), not security warnings.
+        quality: s.quality,
         files: s.files, path: s.dir, overrides: c.overridesFor(s.id), warnings: s.warnings,
         stale: c.stale, problems: errorsOf(c.problems),
       });

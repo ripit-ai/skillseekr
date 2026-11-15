@@ -332,12 +332,14 @@ describe('engine security', () => {
     expect(cat.byId('fine')?.security.status).toBe('clean');
   });
 
-  it('quality findings are added to the scan findings (warned)', async () => {
+  it('P2-R20: quality findings are kept apart from security and never make a skill warned', async () => {
     const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
     await s.write({ r: gh('r') });
-    const sec = (await createEngine(s.ctx).catalog()).byId('a')!.security;
-    expect(sec.status).toBe('warned');
-    expect(sec.findings.map((f) => f.rule)).toContain('quality/description-short');
+    const cat = await createEngine(s.ctx).catalog();
+    const rec = cat.byId('a')!;
+    expect(rec.security).toEqual({ status: 'clean', findings: [] });
+    expect(rec.quality.map((f) => f.rule)).toContain('quality/description-short');
+    expect(cat.search('a desc')[0]).toMatchObject({ id: 'a', security: { status: 'clean', warnings: 0 }, quality: rec.quality.length });
   });
 
   it('P2-2: a branch ref that advances to a commit with a critical is blocked after TTL expiry, without sync', async () => {

@@ -97,10 +97,13 @@ describe('mcp server', () => {
     expect(missing).toMatchObject({ isError: true, data: { error: 'not-found' } });
   });
 
-  it('get_skill shows quality warnings in security.warnings', async () => {
+  it('P2-R20: get_skill returns quality findings apart from security.warnings', async () => {
     const s = await setup(fixture());
     const got = await s.call('get_skill', { skill: 'alpha' });
-    expect(got.data.security.warnings.map((f: { rule: string }) => f.rule)).toContain('quality/description-short');
+    expect(got.data.quality.map((f: { rule: string }) => f.rule)).toContain('quality/description-short');
+    expect(got.data.security).toEqual({ status: 'clean', warnings: [] });
+    const hit = (await s.call('search_skills', { query: 'alpha' })).data.results[0];
+    expect(hit).toMatchObject({ id: 'alpha', security: { status: 'clean', warnings: 0 }, quality: got.data.quality.length });
   });
 
   it('get_skill on a missing skill returns isError with suggestions', async () => {
@@ -157,7 +160,7 @@ describe('mcp server', () => {
     const l = await s.call('list_installed', { scope: 'project' });
     expect(l.data.installed).toEqual([{
       name: 'alpha', scope: 'project', dir: join(s.project, '.claude', 'skills', 'alpha'),
-      id: 'alpha', registry: 'one', via: ['one'], status: 'current', security: 'warned',
+      id: 'alpha', registry: 'one', via: ['one'], status: 'current', security: 'clean',
     }]);
   });
 

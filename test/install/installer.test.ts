@@ -35,7 +35,7 @@ async function mkSkill(src: string, id: string, files: Record<string, string> = 
   const dir = join(src, id);
   await put(dir, files);
   const { hash, files: list } = await contentHash(dir);
-  return { id, name, description: 'd', dir, files: list, contentHash: hash, warnings: [], registry: 'reg', via: ['top', 'reg'], ref: 'main', sha: 'abc1234', security: CLEAN };
+  return { id, name, description: 'd', dir, files: list, contentHash: hash, warnings: [], registry: 'reg', via: ['top', 'reg'], ref: 'main', sha: 'abc1234', security: CLEAN, quality: [] };
 }
 const catalogOf = (...skills: SkillRecord[]) => {
   const reg = { name: 'reg', via: ['top', 'reg'], entry: {} } as unknown as ResolvedRegistry;
@@ -351,7 +351,7 @@ describe('blocked skills and installed-copy security', () => {
     expect(r[0]).toMatchObject({ name: 'a', dir, result: 'blocked' });
     expect(await readFile(join(dir, 'SKILL.md'), 'utf8')).toContain('hi');
     const [i] = await listInstalled(ctx, { catalog: cat });
-    expect(['clean', 'warned']).toContain(i!.security!.status);
+    expect(i!.security!.status).toBe('clean'); // P2-R20: quality findings never make an installed copy warned
   });
 
   it('listInstalled leaves security out without a catalog', async () => {
