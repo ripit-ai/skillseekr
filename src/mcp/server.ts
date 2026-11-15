@@ -8,10 +8,10 @@ import { z } from 'zod';
 import { defaultContext, type Ctx } from '../context.js';
 import { createEngine, type Engine } from '../engine.js';
 import { InstallError, installSkill, listInstalled, statusOf } from '../install/installer.js';
-import type { Catalog } from '../catalog/catalog.js';
+import type { Catalog, SkillRecord } from '../catalog/catalog.js';
 import type { Problem } from '../types.js';
 
-const INSTRUCTIONS = 'Use skillseekr to find organization skills before specialized or unfamiliar work. Call search_skills with a short description of the task; if a result fits, call get_skill and follow it, reading supporting files with read_skill_file. Say which registry a skill came from if the user asks or if it overrides another skill. Only call install_skill if the user asks to keep a skill or agrees when you offer.';
+const INSTRUCTIONS = 'Use skillseekr to find organization skills before specialized or unfamiliar work. Call search_skills with a short description of the task; if a result fits, call get_skill and follow it, reading supporting files with read_skill_file. Say which registry a skill came from if the user asks or if it overrides another skill. Only call install_skill if the user asks to keep a skill or agrees when you offer. If a skill comes back with security warnings or an allowedBy label, tell the user before following it. Never try to unblock a blocked skill; that is a human decision.';
 
 type Result = CallToolResult;
 const ok = (data: unknown): Result => ({ content: [{ type: 'text', text: JSON.stringify(data) }] });
@@ -50,6 +50,16 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
     return { error: fail({ error: 'not-found', suggestions: catalog.search(skill, 3).map((h) => h.id) }) };
   }
 
+  /** The error a blocked skill gets from get_skill, read_skill_file and install_skill. */
+  function blockedResult(s: SkillRecord): Result {
+    const by = s.security.blockedBy;
+    return fail({
+      error: 'blocked', id: s.id, ...(by && { blockedBy: by }),
+      findings: s.security.findings.filter((f) => f.severity === 'critical').map(({ rule, file, line, message }) => ({ rule, file, line, message })),
+      ...(by?.kind === 'deny' && { reason: by.entry.reason }),
+    });
+  }
+
   const tool = <S extends z.ZodRawShape>(
     name: string, description: string, inputSchema: S,
     handler: (args: z.infer<z.ZodObject<S>>) => Promise<Result>,
@@ -78,6 +88,7 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
       const r = resolveSkill(c, skill);
       if (r.error) return r.error;
       const s = r.skill;
+      if (s.security.status === 'blocked') return blockedResult(s);
       const f = await c.readFile(s, 'SKILL.md');
       if (f.kind === 'refused') return fail({ error: 'refused', reason: f.reason });
       if (f.kind === 'missing') return fail({ error: 'not-found', message: `SKILL.md of "${s.id}" is missing from the cache; run "skillseekr sync"` });
@@ -85,6 +96,12 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
         id: s.id, name: s.name, description: s.description, registry: s.registry, via: s.via,
         // Over 1 MB (or binary): metadata only, like read_skill_file.
         ...(f.kind === 'text' ? { body: f.content } : { skillMd: { kind: f.kind, size: f.size, path: f.path } }),
+        security: {
+          status: s.security.status,
+          ...(s.security.allowedBy && { allowedBy: s.security.allowedBy.label }),
+          warnings: s.security.findings.filter((x) => x.severity === 'warning'),
+          ...(s.security.allowedBy && { allowedRules: s.security.allowedBy.rules }),
+        },
         files: s.files, path: s.dir, overrides: c.overridesFor(s.id), warnings: s.warnings,
         stale: c.stale, problems: errorsOf(c.problems),
       });
@@ -96,6 +113,7 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
       const c = await engine.catalog();
       const r = resolveSkill(c, skill);
       if (r.error) return r.error;
+      if (r.skill.security.status === 'blocked') return blockedResult(r.skill);
       const f = await c.readFile(r.skill, path);
       switch (f.kind) {
         case 'text': return ok({ content: f.content });
@@ -112,6 +130,7 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
       const c = await engine.catalog();
       const r = resolveSkill(c, skill);
       if (r.error) return r.error;
+      if (r.skill.security.status === 'blocked') return blockedResult(r.skill);
       try {
         return ok(await installSkill(r.skill, scope ?? 'project', ctx, { projectDir: await projectDir() }));
       } catch (e) {

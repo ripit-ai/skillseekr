@@ -18,6 +18,11 @@ describe('Claude Code plugin', () => {
     expect(b.equals(a)).toBe(true);
   });
 
+  it('starter skill body tells the agent to report security warnings and overrides', async () => {
+    const text = (await read('assets/starter-skill/SKILL.md')).toString('utf8');
+    expect(text.endsWith("---\nCall `search_skills` with a short description of the task. If a result fits, call `get_skill` and follow it. If the skill has security warnings or was allowed by an override, tell the user before following it. Don't install a skill unless the user asks or agrees.\n")).toBe(true);
+  });
+
   it('marketplace.json lists plugin "skillseekr" with source "./plugins/skillseekr"', async () => {
     const m = await json('.claude-plugin/marketplace.json');
     expect(m.name).toBe('skillseekr');
