@@ -18,7 +18,10 @@ export function registerUpdate(program: Command, cli: Cli): void {
       }
       const failed = results.filter((r) => r.result === 'failed');
       for (const f of results) if (f.result === 'failed' || f.result === 'blocked') cli.io.err(`${f.name}: ${f.message} (${f.dir})\n`);
-      const failure = failed.length > 0 ? new CliError(`${failed.length} skill(s) failed to update`) : undefined;
+      // Minor 3: an installed copy that is itself blocked fails the run; a blocked catalog version alone does not.
+      const blockedCopies = results.filter((r) => r.result === 'blocked' && r.copy);
+      const failure = failed.length > 0 ? new CliError(`${failed.length} skill(s) failed to update`)
+        : blockedCopies.length > 0 ? new CliError(`${blockedCopies.length} installed ${blockedCopies.length === 1 ? 'copy is' : 'copies are'} blocked; remove ${blockedCopies.length === 1 ? 'it' : 'them'}`) : undefined;
       if (isJson(cmd)) printJson(cli.io, { results, stale: catalog.stale });
       else if (results.length === 0) cli.io.out('no skills installed\n');
       else {

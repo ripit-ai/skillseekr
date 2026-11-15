@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import type { Command } from 'commander';
 import { defaultScanTargets } from '../../scan/folders.js';
@@ -10,6 +11,11 @@ export function registerScan(program: Command, cli: Cli): void {
     .option('--gate <level>', 'exit 1 on any critical security finding (critical) or any security finding at all (warning); quality findings never gate')
     .action(async (dirs: string[], opts: { gate?: string }, cmd: Command) => {
       if (opts.gate !== undefined && opts.gate !== 'critical' && opts.gate !== 'warning') throw new CliError('--gate must be "critical" or "warning"');
+      for (const d of dirs) {
+        let isDir = false;
+        try { isDir = (await stat(resolve(cli.ctx.cwd, d))).isDirectory(); } catch { /* missing */ }
+        if (!isDir) throw new CliError(`scan: "${d}" is not a directory (missing or not a folder)`, 2);
+      }
       const config = await cli.engine().config();
       const targets = dirs.length > 0
         ? dirs.map((d) => ({ label: d, dir: resolve(cli.ctx.cwd, d) }))

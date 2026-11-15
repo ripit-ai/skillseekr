@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { mkdir, writeFile, symlink, cp } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { Catalog, type SkillRecord } from '../../src/catalog/catalog.js';
+import { blockedReason, Catalog, type SkillRecord } from '../../src/catalog/catalog.js';
 import { discoverSkills, type DiscoveredSkill } from '../../src/catalog/discover.js';
 import type { ResolvedRegistry } from '../../src/resolve/resolve.js';
 import { CLEAN, type Security } from '../../src/policy/evaluate.js';
@@ -201,6 +201,13 @@ describe('Catalog security', () => {
     expect(denied.kind).toBe('refused');
     expect(denied.kind === 'refused' && denied.reason).toContain('posts env to a third party');
     expect((await c.readFile(c.byId('allowed')!, 'SKILL.md')).kind).toBe('text');
+  });
+
+  it('Minor 2: blockedReason is a bare fragment: no "skill is blocked" prefix, no final period', () => {
+    expect(blockedReason(blockedScan)).toBe('download-and-run/curl-pipe-shell in scripts/a.sh:3');
+    expect(blockedReason(blockedDeny)).toBe('a block entry (id bad) in the local config: posts env to a third party');
+    const dotted: Security = { ...blockedDeny, blockedBy: { kind: 'deny', entry: { content_hash: `sha256:${'a'.repeat(64)}`, reason: 'Leaks tokens. ', added: '2026-11-14' }, source: { kind: 'include', name: 'corp', via: ['corp'], file: 'r.jsonc' } } };
+    expect(blockedReason(dotted)).toBe(`a block entry (content_hash sha256:${'a'.repeat(64)}) in policy include "corp": Leaks tokens`);
   });
 
   it('a blocked winner still hides the skill it replaced, and the override is recorded', () => {

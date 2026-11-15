@@ -12,7 +12,9 @@ export interface Installed { name: string; scope: Scope; dir: string; tool?: Too
 export type InstallStatus = 'current' | 'outdated' | 'modified' | 'missing-from-catalog' | 'blocked';
 export type UpdateResult =
   | { name: string; dir: string; result: 'updated' | 'current' | 'skipped-modified' | 'missing-from-catalog' }
-  | { name: string; dir: string; result: 'failed' | 'blocked'; message: string };
+  | { name: string; dir: string; result: 'failed'; message: string }
+  /** `copy`: the installed copy itself is blocked (it must be removed); otherwise only the catalog version is. */
+  | { name: string; dir: string; result: 'blocked'; message: string; copy: boolean };
 
 const MARKER_FILE = '.skillseekr.json';
 
@@ -118,7 +120,7 @@ async function installInto(skill: SkillRecord, parent: string, folder: string, c
  */
 export async function installSkill(skill: SkillRecord, scope: Scope, ctx: Ctx, opts?: { projectDir?: string; tools?: ToolId[] }): Promise<{ dirs: string[]; tools: ToolId[] }> {
   if (skill.security.status === 'blocked') {
-    throw new InstallError('blocked', `Skill "${skill.id}" cannot be installed. ${blockedReason(skill.security)}.`);
+    throw new InstallError('blocked', `Skill "${skill.id}" is blocked and cannot be installed: ${blockedReason(skill.security)}.`);
   }
   validateName(skill.name);
   const targets: Target[] = scope === 'project'
@@ -206,7 +208,7 @@ export async function updateInstalled(
     const status = statusOf(i, catalog);
     const skill = catalog.byId(i.marker.id);
     const own = i.security;
-    const ownBlocked = (extra: string) => ({ ...base, result: 'blocked' as const, message: `installed copy${extra} is blocked: ${blockedReason(own!)}. ${removeHint(i)}` });
+    const ownBlocked = (extra: string) => ({ ...base, result: 'blocked' as const, copy: true, message: `installed copy${extra} is blocked: ${blockedReason(own!)}. ${removeHint(i)}` });
     // Order: a copy missing from the catalog is still rescanned (blocked wins). Then a blocked catalog version is
     // never installed and the copy is left alone. Then a copy that stays as it is (current, or modified without
     // --force) is reported blocked if it is. A copy about to be replaced by a clean catalog version is not
@@ -216,7 +218,7 @@ export async function updateInstalled(
       continue;
     }
     if (skill.security.status === 'blocked') {
-      out.push({ ...base, result: 'blocked', message: `catalog version is blocked: ${blockedReason(skill.security)}. The installed copy was left unchanged; ${removeHint(i)}` });
+      out.push({ ...base, result: 'blocked', copy: own?.status === 'blocked', message: `catalog version is blocked: ${blockedReason(skill.security)}. The installed copy was left unchanged; ${removeHint(i)}` });
       continue;
     }
     const stays = status === 'current' || (status === 'modified' && !opts.force);

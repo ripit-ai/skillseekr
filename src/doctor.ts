@@ -128,7 +128,7 @@ export async function doctor(engine: Engine, ctx: Ctx, opts: { vscodeWorkspace?:
   const blocked = catalog.blocked();
   if (blocked.length > 0) add('security:blocked', 'warn', `${blocked.length} blocked ${blocked.length === 1 ? 'skill' : 'skills'}: ${list(blocked.map((b) => `${b.id} (${blockedReason(b.security)})`))}`);
   for (const i of installed) {
-    if (i.security?.status === 'blocked') add(`security:installed:${i.name}:${i.scope}${i.tool ? `:${i.tool}` : ''}`, 'fail', `installed copy at ${i.dir} is blocked: ${blockedReason(i.security)}; ${removeHint(i)}`);
+    if (i.security?.status === 'blocked') add(`security:installed:${i.name}:${i.scope}${i.tool ? `:${i.tool}` : ''}`, 'fail', `installed copy at ${i.dir} is blocked: ${blockedReason(i.security)}. ${removeHint(i)}`);
   }
   const allows = catalog.policy.sources.filter((s) => s.source.kind === 'local').flatMap((s) => Object.entries(s.allow));
   if (allows.length > 0) add('policy:allow', 'warn', `${allows.length} local allow ${allows.length === 1 ? 'entry' : 'entries'}: ${list(allows.map(([id, a]) => `${id} (added ${a.added}; rules: ${a.rules.join(', ')})`))}`);

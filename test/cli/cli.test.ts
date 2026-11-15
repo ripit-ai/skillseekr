@@ -651,6 +651,49 @@ describe('cli security surface', () => {
     expect(l.out).toMatch(/alpha\s+project\s+-\s+current\s+clean/);
   });
 
+  it('Minor 2: block reasons read "<prefix>: <reason>." with one period, never ".."', async () => {
+    const s = await setup({ registries: { one: gh('one') }, repos: withBad() });
+    const bad = await s.run('install', 'bad');
+    expect(bad.code).toBe(1);
+    expect(bad.err).toContain('Skill "bad" is blocked and cannot be installed: download-and-run/curl-pipe-shell in run.sh:2.\n');
+    expect((await s.run('install', 'alpha')).code).toBe(0);
+    expect((await s.run('block', 'alpha', '--reason', 'Leaks tokens.')).code).toBe(0);
+    const i = await s.run('install', 'alpha');
+    expect(i.err).toContain('Skill "alpha" is blocked and cannot be installed: a block entry (id alpha) in the local config: Leaks tokens.\n');
+    const l = await s.run('list');
+    expect(l.err).toContain('alpha: installed copy is blocked: a block entry (id alpha) in the local config: Leaks tokens. remove it with: skillseekr remove alpha');
+    expect((await s.run('show', 'alpha')).out).toContain('  blocked by: a block entry (id alpha) in the local config: Leaks tokens\n');
+    for (const r of [i, l, await s.run('update'), await s.run('doctor')]) {
+      expect(r.out + r.err).not.toContain('..');
+      expect(r.out + r.err).not.toContain('skill is blocked');
+    }
+  });
+
+  it('Minor 3: update exits 1 when an installed copy is itself blocked, 0 when only the catalog version is', async () => {
+    const spec = withBad();
+    const s = await setup({ registries: { one: gh('one') }, repos: spec });
+    expect((await s.run('install', 'alpha')).code).toBe(0);
+    spec['o/one']!.commits[SHA2] = { ...spec['o/one']!.commits[SHA]!, 'skills/alpha/run.sh': CURL };
+    spec['o/one']!.refs.main = SHA2;
+    expect((await s.run('sync')).code).toBe(0);
+    const cat = await s.run('update');
+    expect(cat.err).toContain('alpha: catalog version is blocked');
+    expect(cat.code).toBe(0);
+    await writeFile(join(s.cwd, '.claude/skills/alpha/run.sh'), CURL); // the copy itself now holds a critical
+    const own = await s.run('update');
+    expect(own.err).toContain('1 installed copy is blocked; remove it');
+    expect(own.code).toBe(1);
+    const j = JSON.parse((await s.run('--json', 'update')).out);
+    expect(j.results[0]).toMatchObject({ name: 'alpha', result: 'blocked', copy: true });
+    // A clean catalog version and an edited copy that is blocked: the copy stays (modified) and fails the run.
+    const t = await setup({ registries: { one: gh('one') } });
+    expect((await t.run('install', 'alpha')).code).toBe(0);
+    await writeFile(join(t.cwd, '.claude/skills/alpha/run.sh'), CURL);
+    const m = await t.run('update');
+    expect(m.err).toContain('alpha: installed copy is blocked: download-and-run/curl-pipe-shell in run.sh:2.');
+    expect(m.code).toBe(1);
+  });
+
   it('P2-5: a blocked installed copy shows blocked in list and outdated, with the remove hint on stderr', async () => {
     const s = await setup({ registries: { one: gh('one') } });
     expect((await s.run('install', 'alpha')).code).toBe(0);
@@ -812,7 +855,20 @@ describe('cli scan', () => {
     expect(r.code).toBe(1);
     expect(r.out).toContain('WARNING  warny');
     expect((await s.run('scan', join(bare, 'short'))).out).toContain('quality/description-short');
-    expect((await s.run('scan', join(s.dir, 'empty-nothing'))).out).toBe('no skills found to scan\n');
+    await mkdir(join(s.dir, 'empty-dir'));
+    expect((await s.run('scan', join(s.dir, 'empty-dir'))).out).toBe('no skills found to scan\n');
+  });
+
+  it('Minor 1: scan with a missing or non-directory path is a usage error (exit 2) naming it', async () => {
+    const s = await setup();
+    const missing = await s.run('scan', 'no-such-dir');
+    expect(missing.code).toBe(2);
+    expect(missing.err).toContain('"no-such-dir" is not a directory');
+    expect(missing.out).toBe('');
+    await writeFile(join(s.cwd, 'file.txt'), 'x');
+    const file = await s.run('scan', 'file.txt');
+    expect(file.code).toBe(2);
+    expect(file.err).toContain('"file.txt" is not a directory');
   });
 
   it('P2-11: with a real config the cache lives outside the scanned folders and the scanned trees are unchanged', async () => {

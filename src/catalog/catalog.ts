@@ -27,16 +27,19 @@ export interface SearchHit {
   quality: number;
 }
 
-/** Why a blocked skill is refused: the deny entry's reason, or the first critical finding's rule and place. */
+/**
+ * Why a blocked skill is refused, as a fragment without a prefix or a final period: the deny entry and its reason, or
+ * the first critical finding's rule and place. Callers write "<prefix>: <reason>." (Minor 2).
+ */
 export function blockedReason(sec: Security): string {
   const by = sec.blockedBy;
   if (by?.kind === 'deny') {
     const what = 'id' in by.entry ? `id ${by.entry.id}` : `content_hash ${by.entry.content_hash}`;
     const where = by.source.kind === 'local' ? 'the local config' : `policy include "${by.source.name}"`;
-    return `skill is blocked by a block entry (${what}) in ${where}: ${by.entry.reason}`;
+    return `a block entry (${what}) in ${where}: ${by.entry.reason.trim().replace(/\.+$/, '')}`;
   }
   const f = sec.findings.find((x) => x.severity === 'critical');
-  return f ? `skill is blocked: ${f.rule} in ${f.file}:${f.line}` : 'skill is blocked';
+  return f ? `${f.rule} in ${f.file}:${f.line}` : 'a critical finding';
 }
 
 const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
@@ -110,7 +113,7 @@ export class Catalog {
   }
 
   async readFile(skill: SkillRecord, relPath: string): Promise<FileRead> {
-    if (skill.security.status === 'blocked') return { kind: 'refused', reason: blockedReason(skill.security) };
+    if (skill.security.status === 'blocked') return { kind: 'refused', reason: `skill is blocked: ${blockedReason(skill.security)}` };
     if (relPath === '') return { kind: 'refused', reason: 'empty path' };
     if (relPath.includes('\0')) return { kind: 'refused', reason: 'path contains NUL' };
     if (isAbsolute(relPath) || relPath.startsWith('/') || relPath.startsWith('\\')) {
