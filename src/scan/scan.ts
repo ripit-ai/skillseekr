@@ -24,6 +24,7 @@ export const UNSCANNABLE_RULE = 'integrity/unscannable-file';
 const unscannable = (file: string, message: string): Finding => ({ rule: UNSCANNABLE_RULE, severity: 'critical', file, line: 1, message });
 const TOO_LARGE = 'file is over 10 MB and was not scanned';
 const OVER_BUDGET = 'exceeds per-skill scan budget';
+const TOO_COMPLEX = 'file could not be scanned (a pattern check exceeded its limits)';
 
 /** Lines up to this long are joined into blocks of about this size and pre-tested once per rule. Every rule is
  * tested against whole logical lines: the regexes are linear-time (see rules.ts). */
@@ -95,7 +96,13 @@ class SkillScan {
     if (this.used + content.length > SKILL_SCAN_BUDGET) { this.findings.push(unscannable(file, OVER_BUDGET)); return; }
     this.used += content.length;
     const kind: FileKind = SCRIPT_EXT.test(file) || SCRIPT_NAME.test(file) || /^\s*#!/.test(text) ? 'script' : 'text';
-    this.findings.push(...new FileScan(file, kind, text).run());
+    try {
+      this.findings.push(...new FileScan(file, kind, text).run());
+    } catch (e) {
+      // Fail closed: a pattern that can't finish on this input (e.g. a regex stack overflow) must not hide it.
+      if (!(e instanceof RangeError)) throw e;
+      this.findings.push(unscannable(file, TOO_COMPLEX));
+    }
   }
 
   result(): ScanResult {

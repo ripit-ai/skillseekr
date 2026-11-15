@@ -38,6 +38,9 @@ export interface Rule {
 const re = (source: string, flags = '') => new RegExp(source, flags);
 const any = (...alternatives: string[]) => alternatives.join('|');
 
+// Repeated groups are bounded ({0,64} and smaller): V8 keeps a backtrack entry per iteration, so an unbounded
+// group repeated over a 10 MB line overflows its stack. (scan.ts also fails closed if a regex throws.)
+//
 // Linear-time shapes. Upstream's `A[^\n]*B` rescans the rest of the line from every A, which is quadratic on a
 // line full of A. `^(?=(?<pre>[^\n]*?)A)\k<pre>(?<hit>A…B)` pins the first A instead: if B doesn't follow the
 // first A, it follows no later one either. `(?:^|\))(?=(?<pre>[^)\n]*?)A)…` does the same per segment when B
@@ -68,20 +71,37 @@ const H = String.raw`[^\S\n]`; // horizontal whitespace, for lookarounds
 
 const DL = String.raw`\b(?:curl|wget)(?:\.exe)?\b`;
 /** A pipe (`|` or `|&`, not `||`). */
-const PIPE = String.raw`(?<!\|)\|(?!\|)&?\s*`;
-/** Commands that run the rest of the line: sudo/doas with their flags, and wrappers such as timeout, nice, env. */
-const RUNNER = String.raw`(?:(?:sudo|doas)(?:\s+(?:--?[\w-]+(?:=\S+)?)(?:\s+(?!-)\S+(?=[^\S\n]))?)*\s+|timeout(?:\s+-\S+)*\s+\S+\s+|nice(?:\s+-n\s*\S+|\s+-\d+)?\s+|nohup\s+|stdbuf(?:\s+-\S+)+\s+|xargs(?:\s+-\S+)*\s+|(?:\/usr\/bin\/)?env(?:\s+-\S+)*(?:\s+\w+=\S*)*\s+)*`;
+const PIPE_SIGN = String.raw`(?<!\|)\|(?!\|)&?`;
+const PIPE = String.raw`${PIPE_SIGN}\s*`;
+/**
+ * P2-R14: the words of a pipe segment before the interpreter may only be wrappers, options (`-x`, `--x`, `--x=y`,
+ * optionally followed by one lower-case value such as `-u root`), env assignments (`X=y`), numbers or durations
+ * (`60`, `5s`), and ALL-CAPS values (`KILL`, `L`). Each word fits exactly one of these, so matching is linear.
+ */
+const WRAPPER = String.raw`(?:sudo|doas|env|time|command|exec|timeout|nice|nohup|stdbuf|ionice|setsid|xargs|builtin)`;
+const PLAIN = String.raw`(?:${WRAPPER}|\d+(?:\.\d+)?[smhd]?|[A-Z][A-Z0-9_]*|[A-Za-z_]\w*=\S*)`;
+const OPTION = String.raw`--?[^\s=-][^\s=]*(?:=\S*)?`;
+const VALUE = String.raw`(?!${PLAIN}(?:${H}|$))[^\s-]\S*`;
+const RUNNER = String.raw`(?:(?:${PLAIN}|${OPTION}(?:\s+${VALUE})?)\s+){0,64}`;
 const INTERP = String.raw`(?:(?:ba|z|da|k)?sh|python[23]?|node|perl|ruby)`;
 /**
- * What a download can be piped into to run it. An interpreter given code on its command line (-c/-e/-p) reads
- * stdin as data, unless that code runs stdin (exec, eval, stdin, read, sh, source, or a lone `-`); `-m` is data.
+ * P2-R11a: code given on the interpreter's command line (-c/-e/-p) runs the piped download only if it executes
+ * something: exec, eval, compile, system, subprocess, spawn, popen, source, interact, repl, fileinput, runpy, `$(cat`,
+ * a backtick `cat`, or a shell word. Plain stdin parsing (json.load(sys.stdin), print(…)) is data. `-m` is data.
  */
-const SHELL = String.raw`(?:tee\b[^|\n]*?>\(\s*)?${RUNNER}(?:(?:\/usr)?\/bin\/)?(?:${INTERP}${H}+-\w*[cep]\b[^|\n]*?(?:exec|eval|stdin|read|\bsh\b|\bsource\b|${H}-(?![\w-]))|(?:ba|z|da|k)?sh\b(?!${H}+-c\b)|python[23]?\b(?!${H}+-[cm]\b)|node\b(?!${H}+-[ep]\b)|perl\b(?!${H}+-\w*e)|ruby\b(?!${H}+-e\b)|\$\{?SHELL\b)`;
+const RUNS_INPUT = String.raw`(?:exec|eval|compile|system|subprocess|spawn|popen|source|interact|repl|fileinput|runpy|\$\(\s*cat\b|\x60\s*cat\b|\b(?:ba|z|da|k)?sh\b)`;
+/**
+ * What a download can be piped into to run it: an interpreter, after wrappers, by name or by any absolute path.
+ * It follows PIPE_SIGN directly: the leading lookahead fails a segment with no interpreter name in one pass, and it
+ * runs once per pipe, before the whitespace after the pipe (a lookahead after `\s*` would rescan per space). A pipe
+ * that ends its line also passes, so the block pre-test still finds a command wrapped onto the next line.
+ */
+const SHELL = String.raw`(?=[^|\n]*?(?:sh|python|node|perl|ruby)|${H}*$)\s*(?:tee\b[^|\n]*?>\(\s*)?${RUNNER}(?:(?:\/[^\s/]+){0,32}\/)?(?:${INTERP}${H}+-\w*[cep]\b[^|\n]*?${RUNS_INPUT}|(?:ba|z|da|k)?sh\b(?!${H}+-c\b)|python[23]?\b(?!${H}+-[cm]\b)|node\b(?!${H}+-[ep]\b)|perl\b(?!${H}+-\w*e)|ruby\b(?!${H}+-e\b)|\$\{?SHELL\b)`;
 const PS_DL = String.raw`\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|curl(?:\.exe)?|wget(?:\.exe)?)\b`;
 const IEX = String.raw`\b(?:iex|Invoke-Expression)\b`;
 const SUBST = String.raw`["']?(?:\$\(|\x60)\s*${DL}`; // "$(curl" or `curl
 
-const pipeToShell = (n: string) => firstThen(n, DL, String.raw`[^\n]*?${PIPE}${SHELL}`);
+const pipeToShell = (n: string) => firstThen(n, DL, String.raw`[^\n]*?${PIPE_SIGN}${SHELL}`);
 const substitution = any(
   String.raw`(?:\b${INTERP}|\bsource|(?:^|[\s;&|])\.)\s+<\(\s*${DL}`, // bash <(curl …), python3 <(curl …), . <(curl …)
   String.raw`(?:\beval|\b(?:ba|z|da|k)?sh\s+-c|\bpython[23]?\s+-c|\$\{?SHELL\}?\s+-c)\s*${SUBST}`, // eval "$(curl …)"
@@ -107,7 +127,7 @@ export const RULES: readonly Rule[] = [
   { id: 'prompt-injection/override-instructions', needles: ['ignore', 'disregard', 'forget'], severity: 'critical', target: 'text', message: "tries to override the agent's instructions",
     re: /\b(?:ignore|disregard|forget)\s+(?:(?:all|any)\s+)?(?:of\s+)?(?:(?:the|your|my|these|those|its)\s+)?(?:previous|prior|earlier|above|preceding|system)\s+(?:instructions?|prompts?|rules|directions)\b/i },
   { id: 'prompt-injection/role-impersonation', needles: ['system', 'you'], severity: 'critical', target: 'text', message: 'impersonates a system prompt or a jailbroken mode',
-    re: /^\s*(?:>\s*)*(?:<\|system\|>|<\|im_start\|>\s*system\b|\[system\]|system\s+prompt\s*:|#{1,6}\s*system(?:\s+(?:prompt|message))?\b[\s:]*$)|\byou\s+are\s+now\s+(?:in\s+)?(?:developer\s+mode|DAN\b|jailbroken)/i },
+    re: /^\s*(?:>\s*){0,16}(?:<\|system\|>|<\|im_start\|>\s*system\b|\[system\]|system\s+prompt\s*:|#{1,6}\s*system(?:\s+(?:prompt|message))?\b[\s:]*$)|\byou\s+are\s+now\s+(?:in\s+)?(?:developer\s+mode|DAN\b|jailbroken)/i },
   { id: 'concealment/hide-from-user', needles: ['user'], severity: 'critical', target: 'text', message: 'asks the agent to hide actions from the user',
     re: /\b(?:do\s+not|don't|never)\s+(?:tell|inform|let)\s+the\s+user\s+(?:that\s+you|about\b|know)\b|\b(?:do\s+not|don't|never)\s+(?:tell|inform)\s+the\s+user\s*(?:[.!,;]|$)|\bwithout\s+(?:telling|informing|notifying)\s+the\s+user\b|\b(?:hide|conceal|keep)\s+(?:this|it|these\s+\w+)\s+(?:secret\s+)?from\s+the\s+user\b/i },
 
@@ -139,7 +159,7 @@ export const RULES: readonly Rule[] = [
   { id: 'download-and-run/download-then-run', needles: ['curl', 'wget'], severity: 'critical', target: 'script', message: 'downloads a file and runs it without verification',
     re: re(String.raw`^(?=(?<a>[^\n]*?)${DL})\k<a>(?<hit>(?=(?<b>[^\n]*?)${lineLocal(OUTPUT)})\k<b>(?=(?<c>[^\n]*?)(?:&&|;))\k<c>[^\n]*?(?:\b(?:ba|z|da|k)?sh\b|\bpython[23]?\b|\bnode\b|\bperl\b|\bruby\b|\bsource\b|\bchmod\s+\+x|\.\/\S|(?:&&|;)\s*(?:sudo\s+)?\/\S))`, 'i') },
   { id: 'remote-code/remote-package', needles: ['npx', 'uvx', 'pip'], severity: 'critical', target: 'script', message: 'installs or runs code from a URL or git ref',
-    re: re(any(String.raw`\bnpx\s+(?:(?:-y|--yes|-p|--package=?)\s*)*(?:https?:|git\+|github:)`, String.raw`\buvx\s+(?:--from(?:=|\s+))?(?:git\+|https?:)`,
+    re: re(any(String.raw`\bnpx\s+(?:(?:-y|--yes|-p|--package=?)\s*){0,16}(?:https?:|git\+|github:)`, String.raw`\buvx\s+(?:--from(?:=|\s+))?(?:git\+|https?:)`,
       String.raw`\bpipx\s+(?:run|install)\s+(?:--spec(?:=|\s+))?(?:git\+|https?:)`, firstThen('', String.raw`\bpip[23]?\s+install\b`, String.raw`[^\n]*?(?:git\+|https?:\/\/)`)), 'i') },
   { id: 'remote-code/url-import', needles: ['import(', 'require('], severity: 'critical', target: 'script', message: 'imports code from a URL at run time',
     re: re(any(String.raw`\b(?:import|require)\(\s*['"\x60]https?:`, firstThen('', String.raw`['"\x60]https?:\/\/`, String.raw`[^\n]*?\b(?:import|require)\(\s*[A-Za-z_$]`)), 'i') },
@@ -147,7 +167,7 @@ export const RULES: readonly Rule[] = [
     re: re(String.raw`(?:^|\))(?=(?<pre>[^)\n]*?)${lineLocal(EXEC_CALL)})\k<pre>(?<hit>${EXEC_CALL}[^)\n]*(?:urlopen|requests\.get|httpx\.get|urllib\.request|fetch\())`, 'i') },
   { id: 'encoded-exec/eval-decoded', needles: ['eval', 'exec', 'base64'], severity: 'critical', target: 'script', message: 'executes encoded or compressed code',
     re: re(any(String.raw`\b(?:eval|exec)\s*\(\s*(?:[\w.]*\.)?(?:b64decode|b32decode|b16decode|a85decode|b85decode|decodebytes|decodestring|unhexlify|fromhex|decompress|atob|base64|codecs\.decode|Buffer\.from)`,
-      firstThen('', DECODE, String.raw`[^\n]*?${PIPE}${SHELL}`), firstThen('2', String.raw`\beval\b`, String.raw`[^\n]*?${DECODE}`))) },
+      firstThen('', DECODE, String.raw`[^\n]*?${PIPE_SIGN}${SHELL}`), firstThen('2', String.raw`\beval\b`, String.raw`[^\n]*?${DECODE}`))) },
 
   // Credentials and exfiltration (scripts).
   { id: 'credential-read/home-credentials', needles: ['.ssh', '.aws', '.netrc', '.docker', '.kube', '.config'], severity: 'critical', target: 'script', message: 'reads credential files',
