@@ -14,10 +14,14 @@ describe('parseFrontmatter', () => {
     expect(r.ok).toBe(true);
     expect(r.data).toEqual({ name: 'a', description: 'b' });
   });
+  it('falls back to top-level key: value lines when strict YAML fails', () => {
+    const r = parseFrontmatter('---\nname: a\ndescription: Does x: y and z\nq: "quoted"\n  indented: no\nnot a pair\n---\nbody');
+    expect(r).toEqual({ ok: true, lenient: true, data: { name: 'a', description: 'Does x: y and z', q: 'quoted' }, body: 'body' });
+  });
   it.each([
     ['no frontmatter', '# hi\n'],
     ['unterminated', '---\nname: a\n'],
-    ['invalid yaml', '---\nname: [unclosed\n---\n'],
+    ['invalid yaml with no key/value lines', '---\n[unclosed\n  - x\n---\n'],
     ['non-object', '---\n- a\n- b\n---\n'],
     ['empty block', '---\n---\n'],
     ['empty text', ''],

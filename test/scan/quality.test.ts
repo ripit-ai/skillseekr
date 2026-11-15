@@ -14,9 +14,7 @@ async function quality(tree: string, id: string) {
   const s = (await discoverSkills(tree, '')).find((x) => x.id === id)!;
   expect(s, id).toBeDefined();
   const md = await readFile(join(s.dir, 'SKILL.md'), 'utf8');
-  // Phase 1's strict YAML parse drops good/env-doctor's description (an unquoted ": " in the value), so read the line directly.
-  const description = s.description || (/^description:\s*(.*)$/m.exec(md)?.[1] ?? '');
-  return qualityFindings({ description, dir: s.dir, files: s.files }, md);
+  return qualityFindings({ description: s.description, dir: s.dir, files: s.files }, md);
 }
 const rules = (f: Array<{ rule: string }>) => f.map((x) => x.rule);
 
@@ -72,13 +70,15 @@ describe('qualityFindings rules', () => {
     const md = [
       '---', 'name: x', '---',
       '[ok](references/a.md#top) [url](https://e.example/x.md) [mail](mailto:a@b.example) [anchor](#sec) [abs](/etc/passwd)',
+      '```', '[fenced](references/fenced.md) `scripts/fenced.sh`', '```',
+      '[enc](references/a%2Emd) [win](references\\a.md) [encgone](references/g%20x.md)',
       '[q](references/a.md?raw=1) [gone](references/gone.md) [up](../outside.md)',
       'Run `scripts/run.sh` or `scripts/missing.sh`; `notes/other.txt` is not checked.',
     ].join('\n');
     const { dir, files } = await tmp({ 'SKILL.md': md, 'references/a.md': 'a', 'scripts/run.sh': 'x' });
     const f = (await qualityFindings({ description: desc, dir, files }, md)).filter((x) => x.rule === 'quality/broken-reference');
     expect(f.map((x) => [x.line, x.message.match(/"([^"]+)"/)![1]])).toEqual([
-      [5, 'references/gone.md'], [5, '../outside.md'], [6, 'scripts/missing.sh'],
+      [8, 'references/g x.md'], [9, 'references/gone.md'], [9, '../outside.md'], [10, 'scripts/missing.sh'],
     ]);
   });
 

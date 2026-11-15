@@ -27,7 +27,9 @@ function localTarget(raw: string): string | undefined {
   let t = raw.trim();
   if (t.startsWith('<') && t.endsWith('>')) t = t.slice(1, -1);
   t = t.replace(/[#?].*$/s, '');
-  if (t === '' || /^[a-z][a-z0-9+.-]*:/i.test(t) || t.startsWith('/') || t.startsWith('\\')) return undefined;
+  try { t = decodeURIComponent(t); } catch { /* keep the raw text */ }
+  t = t.replace(/\\/g, '/');
+  if (t === '' || /^[a-z][a-z0-9+.-]*:/i.test(t) || t.startsWith('/')) return undefined;
   return t;
 }
 
@@ -41,13 +43,20 @@ function exists(target: string, files: Set<string>): boolean {
 function brokenReferences(skillMd: string, files: string[]): Finding[] {
   const known = new Set(files);
   const out: Finding[] = [];
-  const lines = skillMd.replace(/^﻿/, '').split(/\r\n|\r|\n/);
+  const lines = skillMd.replace(/^\uFEFF/, '').split(/\r\n|\r|\n/);
   let start = 0;
   if (lines[0]?.trim() === '---') {
     const end = lines.findIndex((l, i) => i > 0 && l.trim() === '---');
     if (end > 0) start = end + 1;
   }
+  let fence: string | undefined;
   for (let i = start; i < lines.length; i++) {
+    const open = /^ {0,3}(`{3,}|~{3,})/.exec(lines[i]!);
+    if (fence !== undefined) {
+      if (open && open[1]![0] === fence[0] && open[1]!.length >= fence.length && /^\s*$/.test(lines[i]!.slice(open[0].length))) fence = undefined;
+      continue;
+    }
+    if (open) { fence = open[1]; continue; }
     const seen = new Set<string>();
     const check = (raw: string) => {
       const target = localTarget(raw);

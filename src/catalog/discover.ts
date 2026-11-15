@@ -75,6 +75,7 @@ async function build(dir: string, id: string): Promise<DiscoveredSkill> {
   if (!fm.ok) {
     warnings.push('missing frontmatter');
   } else {
+    if (fm.lenient) warnings.push('frontmatter is not strict YAML');
     const n = typeof fm.data.name === 'string' ? fm.data.name.trim() : '';
     if (n !== '') {
       name = n;
