@@ -114,35 +114,41 @@ const hashLine = (l: string, i: number) => /^\s*#/.test(l) && !(i === 0 && l.sta
 
 type ShFrame = { k: 'sq' | 'ansi' | 'dq' | 'bq' | 'cmd' | 'param' | 'arith'; depth: number };
 type Heredoc = { word: string; strip: boolean };
-const HEREDOC_OP = /^<<(-?)[ \t]*\\?(["']?)([^\s'"<>|;&()]+)\2/;
 const WORD_BREAK = ' \t;&|()<>';
+/** Lexer state that outlives a line: the frame stack, heredocs waiting for their body, and whether it lost track. */
+type ShState = { stack: ShFrame[]; queued: Heredoc[]; lost: boolean };
+/** A `case` reserved word; inside `$( … )` its `pat)` arms close parentheses the lexer cannot pair (P2-R16). */
+const CASE_WORD = /\bcase\b/g;
 
 /**
  * Shell (sh/bash/zsh, extensionless scripts, Makefile, justfile, .envrc) whole-line comments (P2-R12, round 5). A
  * per-line lexer carries its state across lines: '…' (no escapes), "…" and $'…' (with escapes), backticks, $( … ),
  * $(( … )) and (( … )), ${ … }, and heredoc bodies (`<<[-]WORD` up to the WORD line). A `#` line is a comment only
  * when the lexer is at top level at its start: not inside any of those, and not continued by a backslash. In a
- * Makefile a `define` (a multi-line value whose `#` lines are text) ends all downgrades.
+ * Makefile a `define` (a multi-line value whose `#` lines are text) ends all downgrades. P2-R16: so do the shapes
+ * whose parse differs between shells or needs a grammar the lexer lacks: a `case` word inside `$( … )`, a `'` in a
+ * `${ … }` nested in "…" (literal in dash and zsh, a quote in bash), and a heredoc delimiter word holding `$` or
+ * a backtick or an unclosed quote.
  */
 function shellComments(lines: string[], file: string, add: (i: number, s: Span) => void): void {
   const make = /(?:^|\/)(?:[Mm]akefile|GNUmakefile)$/.test(file);
-  const stack: ShFrame[] = [];
-  const queued: Heredoc[] = [];
+  const st: ShState = { stack: [], queued: [], lost: false };
   let body: Heredoc | undefined;
   let continued = false;
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i]!;
     if (body) {
-      if ((body.strip ? l.replace(/^\t+/, '') : l) === body.word) body = queued.shift();
+      if ((body.strip ? l.replace(/^\t+/, '') : l) === body.word) body = st.queued.shift();
       continue;
     }
     if (make && /^\s*define\b/.test(l)) return;
-    if (stack.length === 0 && !continued && /^\s*#/.test(l)) {
+    if (st.stack.length === 0 && !continued && /^\s*#/.test(l)) {
       if (hashLine(l, i)) add(i, WHOLE);
       continue;
     }
-    continued = shellLine(l, stack, queued);
-    if (queued.length) body = queued.shift();
+    continued = shellLine(l, st);
+    if (st.lost) return;
+    if (st.queued.length) body = st.queued.shift();
   }
 }
 
@@ -171,17 +177,33 @@ function shDollar(l: string, k: number, stack: ShFrame[], command: boolean): num
 
 const SH_OPEN: Record<string, ShFrame['k']> = { "'": 'sq', '"': 'dq', '`': 'bq' };
 
-/** Lexes one shell line, updating the frame stack and queuing heredocs. Returns whether a backslash continues it. */
-function shellLine(l: string, stack: ShFrame[], queued: Heredoc[]): boolean {
+/**
+ * Lexes one shell line, updating the state (frame stack, queued heredocs, `lost`). Returns whether a backslash
+ * continues it.
+ */
+function shellLine(l: string, st: ShState): boolean {
+  const { stack, queued } = st;
   const n = l.length;
+  // Positions of `case` words on the line, found once (a rescan per stop would be quadratic); `ci` walks them.
+  const cases: number[] = [];
+  if (l.includes('case')) {
+    CASE_WORD.lastIndex = 0;
+    for (let m = CASE_WORD.exec(l); m; m = CASE_WORD.exec(l)) cases.push(m.index);
+  }
+  let ci = 0;
   let k = 0;
   while (k < n) {
     const top = stack[stack.length - 1];
     const stop = SH_STOP[top ? top.k : 'top'];
     stop.lastIndex = k;
     const m = stop.exec(l);
+    const end = m ? m.index : n;
+    if (top?.k === 'cmd' && ci < cases.length) {
+      while (ci < cases.length && cases[ci]! < k) ci++;
+      if (ci < cases.length && cases[ci]! < end) { st.lost = true; return false; }
+    }
     if (!m) return false;
-    k = m.index;
+    k = end;
     const c = m[0];
     if (!top || top.k === 'cmd') {
       if (c === '\\') { if (k === n - 1) return true; k += 2; continue; }
@@ -205,8 +227,9 @@ function shellLine(l: string, stack: ShFrame[], queued: Heredoc[]): boolean {
       if (c === '<') {
         if (l[k + 1] !== '<') { k++; continue; }
         if (l[k + 2] === '<') { k += 3; continue; }
-        const h = HEREDOC_OP.exec(l.slice(k, k + 256));
-        if (h) { queued.push({ word: h[3]!, strip: h[1] === '-' }); k += h[0].length; continue; }
+        const h = heredocWord(l, k + 2);
+        if (h === 'lost') { st.lost = true; return false; }
+        if (h) { queued.push({ word: h.word, strip: h.strip }); k = h.end; continue; }
         k += 2;
         continue;
       }
@@ -233,6 +256,7 @@ function shellLine(l: string, stack: ShFrame[], queued: Heredoc[]): boolean {
         continue;
       default: { // param `${…}` and arithmetic `$((…))` / `((…))`
         if (c === '$') { k += shDollar(l, k, stack, false) || 1; continue; }
+        if (c === "'" && top.k === 'param' && paramInDq(stack)) { st.lost = true; return false; }
         if (c in SH_OPEN) { stack.push({ k: SH_OPEN[c]!, depth: 0 }); k++; continue; }
         if (c === '{' || c === '(') top.depth++;
         else if (top.depth > 0) top.depth--;
@@ -244,6 +268,47 @@ function shellLine(l: string, stack: ShFrame[], queued: Heredoc[]): boolean {
     }
   }
   return false;
+}
+
+/** Whether the `${ … }` frames on top of the stack sit directly inside "…" (P2-R16: dash/zsh read `'` there as text). */
+function paramInDq(stack: ShFrame[]): boolean {
+  let j = stack.length - 1;
+  while (j >= 0 && stack[j]!.k === 'param') j--;
+  return j >= 0 && stack[j]!.k === 'dq';
+}
+
+/**
+ * The heredoc delimiter after `<<` at k (P2-R16): an optional `-`, blanks, then one shell word up to an unquoted
+ * metacharacter. Quote removal applies to the whole word, as in the shell: `E"OF"`, `'E'OF` and `E\OF` are all
+ * `EOF`. Returns undefined for no word, and 'lost' for a word the lexer will not guess at (`$`, a backtick, an
+ * unclosed quote, a trailing backslash).
+ */
+function heredocWord(l: string, k: number): { word: string; strip: boolean; end: number } | 'lost' | undefined {
+  const strip = l[k] === '-';
+  if (strip) k++;
+  while (l[k] === ' ' || l[k] === '\t') k++;
+  let word = '';
+  for (; k < l.length && !WORD_BREAK.includes(l[k]!); k++) {
+    const c = l[k]!;
+    if (c === '$' || c === '`') return 'lost';
+    if (c === '\\') {
+      if (k + 1 >= l.length) return 'lost';
+      word += l[++k];
+    } else if (c === "'") {
+      const close = l.indexOf("'", k + 1);
+      if (close < 0) return 'lost';
+      word += l.slice(k + 1, close);
+      k = close;
+    } else if (c === '"') {
+      for (k++; k < l.length && l[k] !== '"'; k++) {
+        if (l[k] === '$' || l[k] === '`') return 'lost';
+        if (l[k] === '\\' && k + 1 < l.length && '"\\$`'.includes(l[k + 1]!)) k++;
+        word += l[k];
+      }
+      if (k >= l.length) return 'lost';
+    } else word += c;
+  }
+  return word ? { word, strip, end: k } : undefined;
 }
 
 /** Ruby/Perl sections that the script can read back as text: `__END__` / `__DATA__` and the DATA handle. */
@@ -640,7 +705,8 @@ const OTHER_ADDRESS = /\b\d{8,10}\b|\b0x[0-9a-f]{6,8}\b|\[(?!::1\])[0-9a-f.]{0,4
  */
 function localOnly(site: MatchSite): boolean {
   const s = site.text;
-  if (!(JS_FILE.test(site.file) || PY_FILE.test(site.file) ? programLocalOnly(s) : shellLocalOnly(s))) return false;
+  const py = PY_FILE.test(site.file);
+  if (!(JS_FILE.test(site.file) || py ? programLocalOnly(s, py) : shellLocalOnly(s))) return false;
   if (OTHER_ADDRESS.test(s)) return false;
   for (const m of s.matchAll(HOST_LIKE)) if (!LOOPBACK.test(m[0]) && !CODE_NAME.test(m[0])) return false;
   return true;
@@ -665,19 +731,24 @@ const ENTRY = /^(?:([A-Za-z_$][\w$]*)|"([\w -]*)"|'([\w -]*)')\s*:\s*([\s\S]+)$/
  * literal (or, for a keyword-first call, its `url=` is). Every later argument is on an allow-list: a literal, an
  * environment read, `JSON.stringify`/`json.dumps`/`dict` of one, or an object/dict literal whose keys are plain
  * names (no computed `[k]`, shorthand or spread) from OPTION_KEYS with allow-listed values; Python keyword arguments
- * likewise. No `\u`/`\x` escape may appear on the line (they can spell a key), no option can reroute the request,
- * and every `url=`/`url:` is exactly a loopback literal.
+ * likewise (in JS, `name = value` is an assignment and is refused). No `\u`/`\x` escape may appear on the line
+ * (they can spell a key), no option can reroute the request, every `url=`/`url:` is exactly a loopback literal, and
+ * every environment read on the line is inside one of those calls' arguments (P2-R16 probe: a second statement
+ * `get(atob(…) + process.env.T)` is not a localhost call).
  */
-function programLocalOnly(s: string): boolean {
+function programLocalOnly(s: string, py: boolean): boolean {
   // Interpolated strings: `${` here; f-/t-strings in the arguments make callArgs fail, and literalEnd (url=) refuses them.
   if (s.includes('${') || /\\[ux]/.test(s) || PROGRAM_REROUTE.test(s)) return false;
   const calls = [...s.matchAll(CLIENT_CALL)];
   // Each call's arguments are split by a scan to its closing paren; nested calls would make that quadratic.
   if (calls.length === 0 || calls.length > 16) return false;
+  let envInArgs = 0;
   for (const m of calls) {
     const args = callArgs(s, m.index! + m[0].length);
     if (!args || args.length === 0) return false;
+    for (const a of args) envInArgs += countEnvReads(a);
     const kw = args.map((a) => /^(\w+)\s*=(?!=)\s*([\s\S]*)$/.exec(a));
+    if (!py && kw.some(Boolean)) return false;
     if (kw[0] ? !kw.some((k) => k?.[1] === 'url') : !isLiteral(args[0]!, true)) return false;
     for (let n = kw[0] ? 0 : 1; n < args.length; n++) {
       const k = kw[n];
@@ -685,12 +756,16 @@ function programLocalOnly(s: string): boolean {
       return false;
     }
   }
+  if (countEnvReads(s) !== envInArgs) return false;
   return [...s.matchAll(/\burl\s*[=:]\s*/g)].every((m) => {
     const rest = s.slice(m.index! + m[0].length);
     const end = literalEnd(rest);
     return end > 0 && /^\s*(?:[,)}]|$)/.test(rest.slice(end)) && isLiteral(rest.slice(0, end), true);
   });
 }
+
+const ENV_READ = /\b(?:process\.env|os\.environ|os\.getenv)\b/g;
+const countEnvReads = (s: string) => s.match(ENV_READ)?.length ?? 0;
 
 /** An allow-listed argument value. A top-level object literal is an options object (`options`): its keys must be OPTION_KEYS. */
 function safeValue(v: string, depth: number, options = false): boolean {

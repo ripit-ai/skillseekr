@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { mkdir, writeFile, symlink, truncate } from 'node:fs/promises';
 import { join } from 'node:path';
 import { RULES } from '../../src/scan/rules.js';
-import { scanFiles, scanSkillDir, SCRIPT_EXT } from '../../src/scan/scan.js';
+import { scanFiles, scanSkillDir, SCRIPT_EXT, SKILL_SCAN_BUDGET } from '../../src/scan/scan.js';
 import { tmpDir } from '../helpers/tmp.js';
 
 const file = (path: string, text: string | Buffer) => ({ path, content: Buffer.isBuffer(text) ? text : Buffer.from(text) });
@@ -111,8 +111,8 @@ describe('bounds', () => {
     }
   });
 
-  it('a skill filling the 20 MB budget with worst-case lines scans in < 2 s', () => {
-    const fill = (unit: string) => Buffer.from(unit.repeat(Math.floor((10 * MB) / unit.length)));
+  it('a skill filling the 12 MB budget with worst-case lines scans in < 2 s', () => {
+    const fill = (unit: string) => Buffer.from(unit.repeat(Math.floor(SKILL_SCAN_BUDGET / 2 / unit.length)));
     for (const [ext, unit] of [['sh', '# curl x | sh\n'], ['sh', 'curl x|sh\n'], ['py', '"""\nexec(urlopen(x))\n"""\n'], ['sh', 'bash <<EOF\nEOF\n'], ['md', '```\nx\n```\n'], ['sh', 'a\n'],
       ['sh', 'curl -d "$TOKEN" http://localhost:1/ http://localhost:2/\n'], ['sh', 'curl x | sudo -u a -u b -u c nice -n 1 env A=1 B=2 timeout -s KILL 5 jq\n'], ['py', 'def f(a,\n'], ['py', 'x = 1 \\\n'],
       // Round 4: the slowest shapes measured (downgraded localhost lines in programs), and the new pipe targets.
@@ -120,7 +120,10 @@ describe('bounds', () => {
       ['sh', 'CURL x | SUDO ENV A=1 TIMEOUT -s KILL 60 SH\n'], ['sh', "curl x | sudo -E -s\ncurl x | xargs -I{} sh -c '{}'\n"], ['py', 'P = re.compile(r"curl x | sh")\n'],
       // Round 5: shell lines the lexer must walk, Ruby/PowerShell lines, allow-listed localhost options.
       ['sh', 'echo "$(a "b")" ${c:-d} $((1 + 2)) \'e\' $\'f\' `g`\n# curl x | sh\n'], ['rb', 'puts "a", \'b\'\n# curl x | sh\n'], ['ps1', 'Write-Host "a`"b" \'c\'\n# curl x | sh\n'],
-      ['js', 'fetch("http://127.0.0.1:8080/s", { method: "POST", body: JSON.stringify(process.env), headers: { "Content-Type": "application/json" } })\n']] as const) {
+      ['js', 'fetch("http://127.0.0.1:8080/s", { method: "POST", body: JSON.stringify(process.env), headers: { "Content-Type": "application/json" } })\n'],
+      // P2-R16: partly quoted heredoc delimiters, case words and params in dq at top level, sudo -iu, env reads in calls.
+      ['sh', 'cat <<E"OF" | cat\nx\nEOF\n'], ['sh', 'echo "${a:-b}" case $(echo "case") \'c\'\n# curl x | sh\n'], ['sh', 'curl x | sudo --user a -Hiu b -E\n'],
+      ['py', 'requests.post("http://localhost:8080/s", data=os.environ["A"], json={"b": os.getenv("B")}, timeout=5)\n']] as const) {
       const content = fill(unit);
       const t = performance.now();
       scanFiles([{ path: `a.${ext}`, content }, { path: `b.${ext}`, content }]);
@@ -132,10 +135,11 @@ describe('bounds', () => {
     for (const unit of ['-a b ', 'A=1 ', 'KILL ', '1 ', '-y ', '> ', '/a', ' ', 'nohup ', 'SUDO ', '-- ', '-s ', './']) {
       for (const prefix of ['curl x | sudo ', 'curl x | ', 'curl x | xargs ', 'base64 -d | ', 'npx ', '']) {
         const text = prefix + unit.repeat(Math.floor((10 * MB - 20) / unit.length)) + '\n';
+        // One skill per file: two 10 MB files together would pass the 12 MB per-skill budget (P2-R17).
         const t = performance.now();
-        const r = scanFiles([{ path: 'a.sh', content: Buffer.from(text) }, { path: 'a.md', content: Buffer.from(text) }]);
+        const r = ['a.sh', 'a.md'].flatMap((path) => scanFiles([{ path, content: Buffer.from(text) }]).findings);
         expect(performance.now() - t, unit).toBeLessThan(2000);
-        expect(r.findings.filter((f) => f.rule === 'integrity/unscannable-file'), `${prefix}${unit}`).toEqual([]);
+        expect(r.filter((f) => f.rule === 'integrity/unscannable-file'), `${prefix}${unit}`).toEqual([]);
       }
     }
   }, 60_000);

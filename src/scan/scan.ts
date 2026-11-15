@@ -17,8 +17,8 @@ export const SCRIPT_EXT = /\.(?:sh|bash|zsh|py|js|mjs|cjs|ts|rb|pl|ps1)$/i;
 const SCRIPT_NAME = /(?:^|\/)(?:[Mm]akefile|GNUmakefile|\.envrc|\.?[Jj]ustfile|package\.json)$/;
 const SHELLISH = /\.(?:sh|bash|zsh)$|(?:^|\/)(?:[Mm]akefile|GNUmakefile|\.envrc|\.?[Jj]ustfile)$|(?:^|\/)[^./]+$/;
 
-/** All bytes scanned for one skill. Files past it (in path order) are reported, not scanned. */
-export const SKILL_SCAN_BUDGET = 20 * 1024 * 1024;
+/** All bytes scanned for one skill (P2-R17: 12 MB). Files past it (in path order) are reported, not scanned. */
+export const SKILL_SCAN_BUDGET = 12 * 1024 * 1024;
 
 export const UNSCANNABLE_RULE = 'integrity/unscannable-file';
 const unscannable = (file: string, message: string): Finding => ({ rule: UNSCANNABLE_RULE, severity: 'critical', file, line: 1, message });

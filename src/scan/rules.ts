@@ -134,12 +134,16 @@ const INTERP = String.raw`(?:(?:ba|z|da|k)?sh|python[23]?|node|perl|ruby)`;
 const RUNS_INPUT = String.raw`(?:exec|eval|compile|system|subprocess|spawn|popen|source|interact|repl|fileinput|runpy|\/dev\/(?:stdin|fd\/0)|\$\(\s*cat\b|\x60\s*cat\b|\b(?:ba|z|da|k)?sh\b|["'\s;&(]\.${H})`;
 /**
  * A shell run as root with no command reads its commands from stdin (N7): `sudo`/`doas` followed only by options,
- * one of them a lower-case `s` or `i` ending its option word (`-s`, `-i`, `-Es`, `-is`) or `--shell`/`--login`, up
- * to the end of the segment. `-u USER` may carry its value. `sudo cpio -idmv` or `sudo docker load -i x` is not one.
+ * one of them a lower-case `s` or `i` ending its option word (`-s`, `-i`, `-Es`, `-is`), or followed by a combined
+ * `u USER` (`-iu root`, `-su root`; P2-R16), or `--shell`/`--login`, up to the end of the segment. Before and after
+ * it, `-u USER`, `--user USER` and `--user=USER` may carry their value. `sudo cpio -idmv` or `sudo docker load -i x`
+ * is not one.
  */
 const ROOT_OPT = '\u0000ROOT\u0000';
-const ROOT_OPT_SRC = String.raw`-[A-Za-z]*[si]`;
-const ROOT_SHELL = String.raw`(?:sudo|doas)(?:\s+(?:-u\s+[^\s|;&)-]\S*|--user=\S+|-[A-Za-z]+|--[a-z-]+)){0,8}?\s+(?:${ROOT_OPT}|--shell|--login)(?:\s+-[A-Za-z]+){0,8}${H}*(?=$|[|;&)])`;
+const USER_VALUE = String.raw`[^\s|;&)-]\S*`;
+const ROOT_OPT_SRC = String.raw`-[A-Za-z]*[si](?:[A-Za-z]*u\s+${USER_VALUE})?`;
+const SUDO_OPTION = String.raw`(?:-u\s+${USER_VALUE}|--user(?:=\S+|\s+${USER_VALUE})|-[A-Za-z]+|--[a-z-]+)`;
+const ROOT_SHELL = String.raw`(?:sudo|doas)(?:\s+${SUDO_OPTION}){0,8}?\s+(?:${ROOT_OPT}|--shell|--login)(?:\s+${SUDO_OPTION}){0,8}${H}*(?=$|[|;&)])`;
 /**
  * What a download can be piped into to run it: an interpreter (or su), after wrappers, by name or by any path,
  * optionally quoted; a root shell; or `xargs … sh -c` (the input becomes the code, whatever the -c code is). It
