@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { lstat, open, readFile, stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Ctx } from './context.js';
 import { Catalog } from './catalog/catalog.js';
@@ -10,7 +10,7 @@ import { configPath } from './paths.js';
 import { evaluate, type Security } from './policy/evaluate.js';
 import { EMPTY_POLICY, type Policy } from './policy/types.js';
 import { cachedScan } from './scan/cache.js';
-import { qualityFindings } from './scan/quality.js';
+import { qualityFindings, readSkillMd } from './scan/quality.js';
 import { UNSCANNABLE_RULE, scanSkillDir, type Finding } from './scan/scan.js';
 import { SIGNATURE_FILE, verifySkillDir } from './sign/sign.js';
 import { readState, writeCacheFile } from './cache/state.js';
@@ -60,20 +60,6 @@ async function fileStamp(file: string): Promise<string> {
 
 async function generationStamp(file: string): Promise<string> {
   try { return await readFile(file, 'utf8'); } catch { return 'absent'; }
-}
-
-/** SKILL.md as text, at most MAX_FILE_BYTES of it; '' when it isn't a readable regular file. */
-async function readSkillMd(dir: string): Promise<string> {
-  try {
-    const file = join(dir, 'SKILL.md');
-    if (!(await lstat(file)).isFile()) return '';
-    const fh = await open(file, 'r');
-    try {
-      const buf = Buffer.alloc(MAX_FILE_BYTES);
-      const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
-      return buf.subarray(0, bytesRead).toString('utf8');
-    } finally { await fh.close(); }
-  } catch { return ''; }
 }
 
 /** A discovered skill with its verdict: the engine never hands the catalog a skill without one. */

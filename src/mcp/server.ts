@@ -139,7 +139,7 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
       }
     });
 
-  tool('list_installed', 'List skills installed by skillseekr, with status (current, outdated, modified, missing-from-catalog).',
+  tool('list_installed', 'List skills installed by skillseekr, with status (current, outdated, modified, missing-from-catalog) and security (clean, warned, allowed, blocked; a blocked copy should be removed by the user).',
     { scope: z.enum(['project', 'user']).optional() },
     async ({ scope }) => {
       const c = await engine.catalog();

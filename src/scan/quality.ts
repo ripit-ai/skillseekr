@@ -1,5 +1,5 @@
 // Skill quality warnings and near-duplicate detection (Phase 2, Task 3). All findings are warnings.
-import { lstat } from 'node:fs/promises';
+import { lstat, open } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 import { tokenize } from '../catalog/search.js';
 import { MAX_FILE_BYTES } from '../catalog/limits.js';
@@ -119,4 +119,18 @@ export function nearDuplicates(skills: Array<{ id: string; description: string }
     }
   }
   return out.sort((p, q) => (p.a < q.a ? -1 : p.a > q.a ? 1 : p.b < q.b ? -1 : p.b > q.b ? 1 : 0));
+}
+
+/** SKILL.md as text, at most MAX_FILE_BYTES of it; '' when it isn't a readable regular file. */
+export async function readSkillMd(dir: string): Promise<string> {
+  try {
+    const file = join(dir, 'SKILL.md');
+    if (!(await lstat(file)).isFile()) return '';
+    const fh = await open(file, 'r');
+    try {
+      const buf = Buffer.alloc(MAX_FILE_BYTES);
+      const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+      return buf.subarray(0, bytesRead).toString('utf8');
+    } finally { await fh.close(); }
+  } catch { return ''; }
 }
