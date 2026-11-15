@@ -52,13 +52,16 @@ export function createKeyPair(): { privateKeyPem: string; publicKey: string } {
 
 /** { path: sha256 hex }, sorted by path; the signature file and install marker are never included. */
 export function buildManifest(files: FileEntry[]): Record<string, string> {
-  const m: Record<string, string> = {};
-  for (const f of files.filter((x) => !EXCLUDED.has(x.path)).sort((a, b) => cmp(a.path, b.path))) m[f.path] = sha(f.content);
+  // Null prototype: a file named `__proto__` must be an ordinary key, not dropped by the setter.
+  const m: Record<string, string> = Object.create(null) as Record<string, string>;
+  for (const f of files.filter((x) => !EXCLUDED.has(x.path)).sort((a, b) => cmp(a.path, b.path))) {
+    Object.defineProperty(m, f.path, { value: sha(f.content), enumerable: true, writable: true, configurable: true });
+  }
   return m;
 }
 
 const canonical = (manifest: Record<string, string>): Buffer =>
-  Buffer.from(JSON.stringify(Object.keys(manifest).sort(cmp).map((k) => [k, manifest[k]])));
+  Buffer.from(JSON.stringify(Object.entries(manifest).sort((a, b) => cmp(a[0], b[0]))));
 
 export function signFiles(files: FileEntry[], privateKeyPem: string): SignatureDoc {
   const key = loadPrivateKey(privateKeyPem);
@@ -80,8 +83,9 @@ function asDoc(doc: unknown): SignatureDoc | undefined {
 export function verifyFiles(files: FileEntry[], doc: unknown, publicKeys: string[]): VerifyResult {
   const d = asDoc(doc);
   if (!d) return { ok: false, changed: [], error: 'malformed signature' };
-  const have = buildManifest(files);
-  const changed = [...new Set([...Object.keys(have), ...Object.keys(d.manifest)])].filter((p) => have[p] !== d.manifest[p]).sort(cmp);
+  const have = new Map(Object.entries(buildManifest(files)));
+  const signed = new Map(Object.entries(d.manifest)); // Map: hostile keys like `__proto__` are plain entries
+  const changed = [...new Set([...have.keys(), ...signed.keys()])].filter((p) => have.get(p) !== signed.get(p)).sort(cmp);
   const keys: Array<ReturnType<typeof createPublicKey>> = [];
   const bad: string[] = [];
   for (const k of publicKeys) { try { keys.push(publicKeyFromString(k)); } catch (e) { bad.push((e as Error).message); } }
@@ -93,13 +97,22 @@ export function verifyFiles(files: FileEntry[], doc: unknown, publicKeys: string
   return changed.length === 0 ? { ok: true, changed } : { ok: false, changed };
 }
 
-/** Reads the regular files named in `files` (symlinks skipped) plus the signature file. Never throws. */
+const MAX_SIGNATURE_BYTES = 1024 * 1024;
+
+/**
+ * Reads the regular files named in `files` (symlinks skipped) plus the signature file. Never throws.
+ * Callers must pass the skill's real file list (e.g. from listFiles): files not named here are not checked, so
+ * an empty or partial list can only verify what it names; supplying the full list is the caller's responsibility.
+ * Symlinks are out of scope, matching contentHash (regular files only).
+ */
 export async function verifySkillDir(dir: string, files: string[], publicKeys: string[]): Promise<VerifyResult> {
   try {
     const sigPath = join(dir, SIGNATURE_FILE);
     let raw: string;
     try {
-      if (!(await lstat(sigPath)).isFile()) return { ok: false, changed: [], error: 'missing signature' };
+      const st = await lstat(sigPath);
+      if (!st.isFile()) return { ok: false, changed: [], error: 'missing signature' };
+      if (st.size > MAX_SIGNATURE_BYTES) return { ok: false, changed: [], error: 'signature file too large' };
       raw = await readFile(sigPath, 'utf8');
     } catch { return { ok: false, changed: [], error: 'missing signature' }; }
     let doc: unknown;

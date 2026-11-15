@@ -71,6 +71,33 @@ describe('signing', () => {
   });
 });
 
+describe('hostile manifests', () => {
+  it('a file named __proto__ is signed and its tampering detected', () => {
+    const k = createKeyPair();
+    const fl = [...files(), f('__proto__', 'orig')];
+    const doc = signFiles(fl, k.privateKeyPem);
+    expect(Object.keys(doc.manifest)).toContain('__proto__');
+    expect(verifyFiles(fl, JSON.parse(JSON.stringify(doc)), [k.publicKey]).ok).toBe(true);
+    const r = verifyFiles([...files(), f('__proto__', 'EVIL')], JSON.parse(JSON.stringify(doc)), [k.publicKey]);
+    expect(r).toMatchObject({ ok: false, changed: ['__proto__'] });
+    expect(verifyFiles([...files(), f('__proto__', 'EVIL')], signFiles(files(), k.privateKeyPem), [k.publicKey]).ok).toBe(false);
+  });
+  it('hostile manifest keys signed validly but absent from files are reported', () => {
+    const k = createKeyPair();
+    for (const name of ['__proto__', '../x']) {
+      const doc = signFiles([...files(), f(name, 'z')], k.privateKeyPem);
+      expect(verifyFiles(files(), doc, [k.publicKey])).toMatchObject({ ok: false, changed: [name] });
+    }
+  });
+  it('a validly signed manifest that does not match files fails in both directions', () => {
+    const k = createKeyPair();
+    const fewer = signFiles(files().slice(0, 2), k.privateKeyPem); // manifest lacks b.txt
+    expect(verifyFiles(files(), fewer, [k.publicKey])).toMatchObject({ ok: false, changed: ['b.txt'] });
+    const more = signFiles(files(), k.privateKeyPem); // manifest has b.txt, files lack it
+    expect(verifyFiles(files().slice(0, 2), more, [k.publicKey])).toMatchObject({ ok: false, changed: ['b.txt'] });
+  });
+});
+
 describe('verifySkillDir', () => {
   it('verifies a signed dir, skips symlinks, reports missing signature, never throws', async () => {
     const dir = await tmpDir();
@@ -88,6 +115,8 @@ describe('verifySkillDir', () => {
     expect(await verifySkillDir(dir, ['SKILL.md', 'ref/a.md'], [k.publicKey])).toMatchObject({ ok: false, changed: ['ref/a.md'] });
     await writeFile(join(dir, SIGNATURE_FILE), '{not json');
     expect((await verifySkillDir(dir, ['SKILL.md'], [k.publicKey])).error).toBe('malformed signature');
+    await writeFile(join(dir, SIGNATURE_FILE), 'x'.repeat(1024 * 1024 + 1));
+    expect((await verifySkillDir(dir, ['SKILL.md'], [k.publicKey])).error).toBe('signature file too large');
     expect((await verifySkillDir(join(dir, 'nope'), ['SKILL.md'], [k.publicKey])).error).toBe('missing signature');
   });
 });

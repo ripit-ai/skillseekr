@@ -436,6 +436,24 @@ describe('cli', () => {
       expect((await stat(j.privateKeyPath)).mode & 0o777).toBe(0o600);
     });
 
+    it('keys create --force keeps the old keys when the swap cannot be written', async () => {
+      const s = await setup({ registries: {} });
+      const out = join(s.dir, 'keys');
+      const first = (await s.run('keys', 'create', '--out', out)).out.trim();
+      const priv = join(out, 'skillseekr-private.pem');
+      const before = await readFile(priv, 'utf8');
+      await chmod(out, 0o500);
+      try {
+        const r = await s.run('keys', 'create', '--out', out, '--force');
+        if (process.getuid?.() !== 0) expect(r.code).not.toBe(0);
+      } finally { await chmod(out, 0o700); }
+      if (process.getuid?.() !== 0) {
+        expect(await readFile(priv, 'utf8')).toBe(before);
+        expect((await readFile(join(out, 'skillseekr-public.txt'), 'utf8')).trim()).toBe(first);
+      }
+      expect((await readdir(out)).filter((n) => n.includes('.tmp-'))).toEqual([]);
+    });
+
     it('sign writes a signature that verifySkillDir accepts; fails without SKILL.md or with a bad key', async () => {
       const { verifySkillDir } = await import('../../src/sign/sign.js');
       const s = await setup({ registries: {} });
