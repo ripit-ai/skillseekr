@@ -22,7 +22,7 @@ export type FileRead =
 export interface SearchHit {
   id: string; name: string; description: string; registry: string; via: string[]; score: number;
   overrode: Array<{ registry: string; via: string[] }>;
-  security: { status: SecurityStatus; allowedBy?: string; warnings: number };
+  security: { status: SecurityStatus; allowedBy?: string; allowedRules?: string[]; warnings: number };
   /** Number of quality findings (P2-R20); not security warnings. */
   quality: number;
 }
@@ -171,7 +171,7 @@ export class Catalog {
           overrode: this.overridesFor(s.id).map((o) => o.replaced),
           security: {
             status: s.security.status,
-            ...(s.security.allowedBy ? { allowedBy: s.security.allowedBy.label } : {}),
+            ...(s.security.allowedBy ? { allowedBy: s.security.allowedBy.label, allowedRules: [...s.security.allowedBy.rules] } : {}),
             warnings: s.security.findings.filter((f) => f.severity === 'warning').length,
           },
           quality: s.quality.length,

@@ -277,7 +277,10 @@ describe('mcp server', () => {
       expect(allowed.isError).toBe(false);
       expect(allowed.data.security).toMatchObject({ status: 'allowed', allowedBy: 'user', allowedRules: ['download-and-run/curl-pipe-shell'] });
       const ahit = (await s.call('search_skills', { query: 'bad helps' })).data.results.find((h: { id: string }) => h.id === 'bad');
-      expect(ahit.security).toMatchObject({ status: 'allowed', allowedBy: 'user' });
+      expect(ahit.security).toMatchObject({ status: 'allowed', allowedBy: 'user', allowedRules: ['download-and-run/curl-pipe-shell'] });
+      expect((await s.call('install_skill', { skill: 'bad' })).isError).toBe(false);
+      const inst = (await s.call('list_installed', {})).data.installed;
+      expect(inst).toMatchObject([{ id: 'bad', security: 'allowed', allowedBy: 'user', allowedRules: ['download-and-run/curl-pipe-shell'] }]);
       expect((await s.call('read_skill_file', { skill: 'bad', path: 'run.sh' })).isError).toBe(false);
     });
 

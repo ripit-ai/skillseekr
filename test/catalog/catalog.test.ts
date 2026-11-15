@@ -166,12 +166,12 @@ describe('Catalog security', () => {
     expect(new Catalog([], [], [], false, p).policy).toBe(p);
   });
 
-  it('search skips blocked skills; hits carry status, allowedBy label and the warning count', () => {
+  it('search skips blocked skills; hits carry status, allowedBy label, allowedRules and the warning count', () => {
     const c = new Catalog([{ registry: reg('a'), skills: [withSec('bad', blockedScan), withSec('denied', blockedDeny), withSec('ok', allowed), withSec('w', warned), { ...sk('plain'), description: 'plain deploy helper' }] }], [], [], false);
     const hits = c.search('deploy');
     expect(hits.map((h) => h.id).sort()).toEqual(['ok', 'plain', 'w']);
     const by = Object.fromEntries(hits.map((h) => [h.id, h.security]));
-    expect(by.ok).toEqual({ status: 'allowed', allowedBy: 'corp', warnings: 2 });
+    expect(by.ok).toEqual({ status: 'allowed', allowedBy: 'corp', allowedRules: ['x/y'], warnings: 2 });
     expect(by.w).toEqual({ status: 'warned', warnings: 1 });
     expect(by.plain).toEqual({ status: 'clean', warnings: 0 });
   });

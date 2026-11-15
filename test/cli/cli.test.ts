@@ -557,21 +557,34 @@ describe('cli security surface', () => {
     expect(a.err).toContain('blocked by a deny entry; allow cannot lift it');
   });
 
-  it('P2-3: allow --yes then search shows [allowed by user]; allow --list and --json', async () => {
-    const s = await setup({ registries: { one: gh('one') }, repos: withBad() });
+  it('P2-3: allow --yes then search shows [allowed by user: rules]; allow --list and --json', async () => {
+    const spec = withBad();
+    const s = await setup({ registries: { one: gh('one') }, repos: spec });
     expect((await s.run('search', 'bad')).out).toBe('no matching skills\n');
     const a = await s.run('allow', 'bad', '--reason', 'teaches it', '--yes');
     expect(a.code).toBe(0);
     expect(a.out).toContain('download-and-run/curl-pipe-shell');
     expect(s.prompts).toEqual([]);
     expect(JSON.parse(await cfg(s)).allow.bad).toMatchObject({ rules: ['download-and-run/curl-pipe-shell'], reason: 'teaches it', added: '2023-11-14' });
-    expect((await s.run('search', 'bad')).out).toMatch(/\[allowed by user\]/);
-    const l = await s.run('allow', '--list');
-    expect(l.out).toBe('bad  user  added 2023-11-14  rules: download-and-run/curl-pipe-shell\n');
-    expect(JSON.parse((await s.run('--json', 'allow', '--list')).out)).toMatchObject([{ id: 'bad', label: 'user' }]);
+    expect((await s.run('search', 'bad')).out).toMatch(/^bad .*\[allowed by user: download-and-run\/curl-pipe-shell\]$/m);
+    expect(JSON.parse((await s.run('--json', 'search', 'bad')).out)[0].security).toMatchObject({ allowedBy: 'user', allowedRules: ['download-and-run/curl-pipe-shell'] });
+    // Installed copies carry the same label in list and outdated (table and JSON).
+    expect((await s.run('install', 'bad')).code).toBe(0);
+    expect((await s.run('list')).out).toMatch(/^bad\s+project\s+-\s+current\s+allowed \[allowed by user: download-and-run\/curl-pipe-shell\]\s+one\s+one$/m);
+    expect(JSON.parse((await s.run('--json', 'list')).out).installed[0]).toMatchObject({ name: 'bad', security: 'allowed', allowedBy: 'user', allowedRules: ['download-and-run/curl-pipe-shell'] });
     const sh = await s.run('show', 'bad');
     expect(sh.out).toContain('status: allowed');
     expect(sh.out).toContain('allowed by: user');
+    // The catalog moves on; the installed copy is still the allowed content, now outdated.
+    spec['o/one']!.commits[SHA2] = { ...spec['o/one']!.commits[SHA]!, 'skills/bad/SKILL.md': skill('bad', 'v2') };
+    spec['o/one']!.refs.main = SHA2;
+    expect((await s.run('sync')).code).toBe(0);
+    const o = await s.run('outdated');
+    expect(o.out).toMatch(/^bad\s+project\s+-\s+outdated\s+allowed \[allowed by user: download-and-run\/curl-pipe-shell\]/m);
+    expect(JSON.parse((await s.run('--json', 'outdated')).out).outdated[0]).toMatchObject({ name: 'bad', status: 'outdated', security: 'allowed', allowedBy: 'user', allowedRules: ['download-and-run/curl-pipe-shell'] });
+    const l = await s.run('allow', '--list');
+    expect(l.out).toBe('bad  user  added 2023-11-14  rules: download-and-run/curl-pipe-shell\n');
+    expect(JSON.parse((await s.run('--json', 'allow', '--list')).out)).toMatchObject([{ id: 'bad', label: 'user' }]);
   });
 
   it('P2-3: typed confirmation is required; a wrong answer writes nothing', async () => {

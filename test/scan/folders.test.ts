@@ -21,6 +21,26 @@ describe('defaultScanTargets', () => {
     expect(t[2]!.dir).toBe(join(home, '.claude', 'plugins', 'cache', 'm', 'p', '1.0.0', 'skills'));
   });
 
+  it('P2-11: project .github/.agents/.opencode skills and ~/.agents/skills are targets, deduped by real path', async () => {
+    const home = await tmpDir();
+    const project = join(home, 'proj');
+    for (const d of ['.claude/skills', '.github/skills', '.agents/skills', '.opencode/skills']) await mkdir(join(project, d), { recursive: true });
+    await mkdir(join(home, '.agents', 'skills'), { recursive: true });
+    const t = await defaultScanTargets(await ctxFor(home), project);
+    expect(t.map((x) => [x.label, x.dir])).toEqual([
+      ['project', join(project, '.claude/skills')],
+      ['project .github/skills', join(project, '.github/skills')],
+      ['project .agents/skills', join(project, '.agents/skills')],
+      ['project .opencode/skills', join(project, '.opencode/skills')],
+      ['agents user', join(home, '.agents/skills')],
+    ]);
+    // The same folder reached through a symlinked parent is scanned once; missing folders are skipped.
+    const p2 = join(home, 'p2');
+    await mkdir(join(p2, '.claude', 'skills'), { recursive: true });
+    await symlink(join(p2, '.claude'), join(p2, '.agents'));
+    expect((await defaultScanTargets(await ctxFor(home), p2)).map((x) => x.label)).toEqual(['project', 'agents user']);
+  });
+
   it('plugin walking is bounded: too deep, symlinked and non-skills folders are not found', async () => {
     const home = await tmpDir();
     const cache = join(home, '.claude', 'plugins', 'cache');

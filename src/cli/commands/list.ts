@@ -3,7 +3,7 @@ import type { Catalog } from '../../catalog/catalog.js';
 import { blockedReason } from '../../catalog/catalog.js';
 import { listInstalled, statusOf } from '../../install/installer.js';
 import { removeHint } from '../../install/security.js';
-import { isJson, loadCatalog, printJson, table, viaText, type Cli } from '../output.js';
+import { allowedText, isJson, loadCatalog, printJson, table, viaText, type Cli } from '../output.js';
 
 export async function installedRows(cli: Cli, catalog: Catalog, user: boolean | undefined) {
   const items = await listInstalled(cli.ctx, { scope: user ? 'user' : 'project', projectDir: cli.ctx.cwd, catalog });
@@ -11,6 +11,7 @@ export async function installedRows(cli: Cli, catalog: Catalog, user: boolean | 
     name: i.name, id: i.marker.id, scope: i.scope, tool: i.tool ?? '-',
     status: i.security?.status === 'blocked' ? 'blocked' : statusOf(i, catalog),
     security: i.security?.status ?? 'clean',
+    ...(i.security?.allowedBy && { allowedBy: i.security.allowedBy.label, allowedRules: i.security.allowedBy.rules }),
     registry: i.marker.registry, via: i.marker.via, dir: i.dir, item: i,
   }));
 }
@@ -26,7 +27,11 @@ const publicRow = ({ item: _item, ...rest }: Awaited<ReturnType<typeof installed
 export const publicRows = (rows: Awaited<ReturnType<typeof installedRows>>) => rows.map(publicRow);
 
 export const installedTable = (rows: Awaited<ReturnType<typeof installedRows>>): string =>
-  table([['NAME', 'SCOPE', 'TOOL', 'STATUS', 'SECURITY', 'REGISTRY', 'VIA'], ...rows.map((r) => [r.name, r.scope, r.tool, r.status, r.security, r.registry, viaText(r.via)])]);
+  table([['NAME', 'SCOPE', 'TOOL', 'STATUS', 'SECURITY', 'REGISTRY', 'VIA'], ...rows.map((r) => [r.name, r.scope, r.tool, r.status, securityText(r), r.registry, viaText(r.via)])]);
+
+/** The SECURITY cell: the status, and for an allowed copy who allowed it and which rules (P2-5). */
+const securityText = (r: { security: string; allowedBy?: string; allowedRules?: string[] }): string =>
+  r.allowedBy !== undefined ? `${r.security} [${allowedText(r.allowedBy, r.allowedRules ?? [])}]` : r.security;
 
 export function registerList(program: Command, cli: Cli): void {
   program.command('list').description('list installed skills and whether each is out of date')

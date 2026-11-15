@@ -81,6 +81,9 @@ export function lookupOrThrow(catalog: Catalog, idOrName: string) {
   throw new CliError(`skill "${idOrName}" not found${hits.length ? `; did you mean: ${hits.join(', ')}` : ''}`);
 }
 
+/** `allowed by <label>: rule, rule`: who allowed a skill past which critical rules (P2-5). */
+export const allowedText = (label: string, rules: string[]): string => `allowed by ${label}${rules.length > 0 ? `: ${rules.join(', ')}` : ''}`;
+
 /** `file:line rule message (downgraded reason)`: one finding, as shown by `show` and `allow`. */
 export const findingLine = (f: Finding): string =>
   `${f.file}:${f.line} ${f.rule} ${f.message}${f.downgraded ? ` (${f.downgraded})` : ''}`;

@@ -1,5 +1,11 @@
-// Default folders `skillseekr scan` looks at: the project's skills folder, every supported tool's user skills
-// folder, and the skill folders of installed plugins.
+// Default folders `skillseekr scan` looks at: the project's skills folders, every supported tool's user skills
+// folder, the shared ~/.agents/skills, and the skill folders of installed plugins.
+//
+// Plain skill folders, checked against the official docs on 2026-11-14 (P2-11):
+// - Copilot: https://docs.github.com/en/copilot/concepts/agents/about-agent-skills lists project `.github/skills`,
+//   `.claude/skills`, `.agents/skills` and personal `~/.copilot/skills`, `~/.agents/skills`.
+// - OpenCode: https://opencode.ai/docs/skills/ ("Discovery") lists project `.opencode/skills`, `.claude/skills`,
+//   `.agents/skills` and global `~/.config/opencode/skills`, `~/.claude/skills`, `~/.agents/skills`.
 //
 // Plugin locations, checked against the official docs on 2026-11-14:
 // - Claude Code: https://code.claude.com/docs/en/plugins/loading.md ("Find plugins on disk"): installed marketplace
@@ -12,7 +18,7 @@
 //   documents no plugin skill location, so none is added.
 // - OpenCode: https://opencode.ai/docs/plugins/ documents plugin folders (.opencode/plugins, ~/.config/opencode/plugins)
 //   but says nothing about plugins bundling skills, so no plugin skill location is added.
-import { lstat, readdir, readFile } from 'node:fs/promises';
+import { lstat, readdir, readFile, realpath } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { Ctx } from '../context.js';
 import { expandHome } from '../paths.js';
@@ -21,6 +27,8 @@ import { PROJECT_SKILLS_DIR, TOOL_IDS, TOOL_TARGETS } from '../install/targets.j
 export interface ScanTarget { label: string /* e.g. "claude user", "plugin superpowers@5.0.0" */; dir: string /* a skills root */ }
 
 const MAX_DEPTH = 6;
+/** Project skill folders other tools read, besides .claude/skills (see the docs above). */
+const PROJECT_EXTRA_DIRS = ['.github/skills', '.agents/skills', '.opencode/skills'];
 const MAX_MANIFEST_BYTES = 64 * 1024;
 /** Plugin trees under the plugins root that hold installed plugin files. */
 const PLUGIN_TREES = ['cache', 'synced'];
@@ -88,13 +96,19 @@ function pluginLabel(rel: string[]): string {
 export async function defaultScanTargets(ctx: Ctx, projectDir: string): Promise<ScanTarget[]> {
   const out: ScanTarget[] = [];
   const seen = new Set<string>();
+  /** Deduped by real path, so a folder reached twice (e.g. through a symlinked parent) is scanned once. */
   const add = async (label: string, dir: string) => {
     if (seen.has(dir) || !(await isDir(dir))) return;
-    seen.add(dir);
+    let real = dir;
+    try { real = await realpath(dir); } catch { /* keep dir */ }
+    if (seen.has(real)) return;
+    seen.add(dir).add(real);
     out.push({ label, dir });
   };
   await add('project', join(projectDir, PROJECT_SKILLS_DIR));
+  for (const d of PROJECT_EXTRA_DIRS) await add(`project ${d}`, join(projectDir, d));
   for (const t of TOOL_IDS) await add(`${t} user`, join(ctx.home, TOOL_TARGETS[t].userSkillsDir));
+  await add('agents user', join(ctx.home, '.agents', 'skills'));
   const override = ctx.env.CLAUDE_CODE_PLUGIN_CACHE_DIR;
   const root = override ? resolve(ctx.cwd, expandHome(override, ctx.home)) : join(ctx.home, '.claude', 'plugins');
   for (const tree of PLUGIN_TREES) {

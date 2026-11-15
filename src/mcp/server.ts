@@ -151,6 +151,7 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
           name: i.name, scope: i.scope, dir: i.dir, tool: i.tool, id: i.marker.id,
           registry: i.marker.registry, via: i.marker.via, status: statusOf(i, c),
           ...(i.security && { security: i.security.status }),
+          ...(i.security?.allowedBy && { allowedBy: i.security.allowedBy.label, allowedRules: i.security.allowedBy.rules }),
         })),
         problems: errorsOf(c.problems),
       });
