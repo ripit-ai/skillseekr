@@ -5,7 +5,10 @@ import type { SkillRecord } from '../catalog/catalog.js';
 import { parseFrontmatter } from '../catalog/frontmatter.js';
 import { CLEAN } from '../policy/evaluate.js';
 import { contentHash } from '../catalog/hash.js';
-import { defaultConfigText } from '../config/edit.js';
+import { parse as parseJsonc } from 'jsonc-parser';
+import { writeFileAtomic } from '../atomicWrite.js';
+import { defaultConfigText, setTrust } from '../config/edit.js';
+import { publicKeyFromString } from '../sign/sign.js';
 import type { Ctx } from '../context.js';
 import { doctor, type DoctorReport } from '../doctor.js';
 import { createEngine } from '../engine.js';
@@ -44,6 +47,8 @@ export interface SetupOptions {
   registry?: string;
   /** Write `<dir>/.vscode/mcp.json` instead of VS Code's user-level mcp.json. */
   vscodeWorkspace?: string;
+  /** `owner=ed25519:key` entries to add to the config's `trust` list (local config only). */
+  trust?: string[];
   /** Asked once, with the planned changes, when `yes` is false and there is something to change. */
   confirm?: (planned: Change[]) => Promise<boolean>;
 }
@@ -83,6 +88,32 @@ export async function starterState(ctx: Ctx, tool: ToolId, skill: SkillRecord): 
   return found.marker.contentHash === skill.contentHash ? 'current' : 'outdated';
 }
 
+/** Parses and validates `owner=ed25519:key` flags. Throws on the first bad one, before anything is written. */
+export function parseTrust(specs: string[]): Array<{ owner: string; key: string }> {
+  return specs.map((spec) => {
+    const eq = spec.indexOf('=');
+    const owner = eq < 0 ? '' : spec.slice(0, eq).trim();
+    const key = eq < 0 ? '' : spec.slice(eq + 1).trim();
+    if (!/^[A-Za-z0-9_.-]+$/.test(owner) || key === '') throw new Error(`--trust must be "<owner>=ed25519:<key>", got ${JSON.stringify(spec)}`);
+    try { publicKeyFromString(key); } catch (e) { throw new Error(`--trust ${owner}: invalid public key (${msg(e)})`); }
+    return { owner, key };
+  });
+}
+
+/** The config text with each owner's trusted keys merged in (existing keys kept, no duplicates). */
+function withTrust(text: string, trust: Array<{ owner: string; key: string }>): string {
+  let out = text;
+  for (const { owner, key } of trust) {
+    const root = parseJsonc(out, [], { allowTrailingComma: true }) as { trust?: unknown } | undefined;
+    const list = Array.isArray(root?.trust) ? root.trust as unknown[] : [];
+    const entry = list.find((e) => typeof e === 'object' && e !== null && String((e as { owner?: unknown }).owner).toLowerCase() === owner.toLowerCase()) as { public_keys?: unknown } | undefined;
+    const have = Array.isArray(entry?.public_keys) ? entry.public_keys.filter((k): k is string => typeof k === 'string') : [];
+    if (have.includes(key)) continue;
+    out = setTrust(out, owner, [...have, key]);
+  }
+  return out;
+}
+
 function parseRegistry(registry: string): { owner: string; repo: string } {
   const m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(registry);
   if (!m) throw new Error(`--registry must be "owner/repo", got ${JSON.stringify(registry)}`);
@@ -98,6 +129,7 @@ const isToolId = (id: SetupTool): id is ToolId => id !== 'vscode';
  */
 export async function setup(ctx: Ctx, opts: SetupOptions): Promise<SetupResult> {
   const { owner, repo } = parseRegistry(opts.registry ?? DEFAULT_REGISTRY);
+  const trust = parseTrust(opts.trust ?? []);
   const regs: Registrar[] = [];
   for (const r of allRegistrars(opts)) {
     if (opts.tools && !opts.tools.includes(r.id)) continue;
@@ -127,6 +159,12 @@ export async function setup(ctx: Ctx, opts: SetupOptions): Promise<SetupResult> 
   const planned: Change[] = [];
   const configMissing = !(await exists(cfg));
   if (configMissing) planned.push({ file: cfg, before: '(missing)', after: `default config: github-registry ${owner}/${repo}` });
+  const baseConfig = configMissing ? defaultConfigText({ owner, repo, name: owner }) : trust.length > 0 ? await readFile(cfg, 'utf8') : '';
+  let trustedConfig = baseConfig;
+  if (trust.length > 0) {
+    try { trustedConfig = withTrust(baseConfig, trust); } catch (e) { throw new Error(`cannot add trust to ${cfg}: ${msg(e)}`); }
+    if (trustedConfig !== baseConfig) planned.push({ file: cfg, before: configMissing ? '(no trust entries)' : 'trust: unchanged', after: `trust: ${trust.map((t) => `${t.owner} ${t.key.slice(0, 18)}…`).join(', ')}` });
+  }
   let claudeViaMcp = false;
   for (const r of regs) {
     try {
@@ -156,6 +194,10 @@ export async function setup(ctx: Ctx, opts: SetupOptions): Promise<SetupResult> 
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
     }
+  }
+  if (trustedConfig !== baseConfig) {
+    await writeFileAtomic(cfg, trustedConfig);
+    changes.push(planned.find((c) => c.file === cfg && c.after?.startsWith('trust:'))!);
   }
   for (const r of regs) {
     try {

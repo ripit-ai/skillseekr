@@ -4,7 +4,7 @@ import { DEFAULT_REGISTRY, SETUP_TOOLS, setup, type Change, type SetupTool } fro
 import { CliError, isJson, printJson, type Cli, type Io } from '../output.js';
 import { doctorFailure, printDoctor } from './doctor.js';
 
-interface SetupOpts { tools?: string; yes?: boolean; registry?: string; vscodeWorkspace?: string }
+interface SetupOpts { tools?: string; yes?: boolean; registry?: string; vscodeWorkspace?: string; trust?: string[] }
 
 function parseTools(list: string | undefined): SetupTool[] | undefined {
   if (list === undefined) return undefined;
@@ -40,6 +40,7 @@ export function registerSetup(program: Command, cli: Cli): void {
     .option('--yes', 'apply without asking')
     .option('--registry <owner/repo>', `registries file for a new config (default: ${DEFAULT_REGISTRY})`)
     .option('--vscode-workspace <dir>', "write <dir>/.vscode/mcp.json instead of VS Code's user mcp.json")
+    .option('--trust <owner=ed25519:key>', 'trust this public key for a registry owner (repeatable; written to your local config)', (v: string, prev: string[] = []) => [...prev, v])
     .action(async (opts: SetupOpts, cmd: Command) => {
       const tools = parseTools(opts.tools);
       let result;
@@ -47,6 +48,7 @@ export function registerSetup(program: Command, cli: Cli): void {
         result = await setup(cli.ctx, {
           yes: opts.yes === true,
           ...(tools ? { tools } : {}),
+          ...(opts.trust ? { trust: opts.trust } : {}),
           ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
           ...(opts.vscodeWorkspace !== undefined ? { vscodeWorkspace: resolve(cli.ctx.cwd, opts.vscodeWorkspace) } : {}),
           confirm: confirmWith(cli.io, isJson(cmd)),

@@ -3,6 +3,8 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import type { Ctx, Exec, ExecResult } from '../../src/context.js';
 import { setup } from '../../src/setup/setup.js';
+import { createKeyPair } from '../../src/sign/sign.js';
+import { parse as parseJsonc } from 'jsonc-parser';
 import { claudeRegistrar } from '../../src/setup/registrars/claude.js';
 import { readJsonValue } from '../../src/setup/jsonMerge.js';
 import { opencodeRegistrar } from '../../src/setup/registrars/opencode.js';
@@ -291,5 +293,43 @@ describe('setup', () => {
     expect(r.changes.some((c) => c.file === e.configFile)).toBe(false);
     expect(r.changes.some((c) => c.file?.endsWith('mcp-config.json'))).toBe(true);
     expect(r.doctor.checks.length).toBeGreaterThan(0);
+  });
+
+  it('setup --trust writes the trust entry with the default config, and a second run changes nothing', async () => {
+    const e = await env();
+    const a = createKeyPair().publicKey;
+    const b = createKeyPair().publicKey;
+    const trust = [`ripit-ai=${a}`, `acme=${b}`];
+    const first = await setup(e.ctx, { yes: true, trust });
+    const cfg = parseJsonc(await readFile(e.configFile, 'utf8')) as { registries: object; trust: Array<{ owner: string; public_keys: string[] }> };
+    expect(Object.keys(cfg.registries)).toEqual(['ripit-ai']);
+    expect(cfg.trust).toEqual([{ owner: 'ripit-ai', public_keys: [a] }, { owner: 'acme', public_keys: [b] }]);
+    expect(first.changes.some((c) => c.file === e.configFile && c.after?.startsWith('trust:'))).toBe(true);
+    const before = await readFile(e.configFile, 'utf8');
+    const mtime = (await stat(e.configFile)).mtimeMs;
+    const second = await setup(e.ctx, { yes: true, trust });
+    expect(second.changes).toEqual([]);
+    expect(await readFile(e.configFile, 'utf8')).toBe(before);
+    expect((await stat(e.configFile)).mtimeMs).toBe(mtime);
+  });
+
+  it('setup --trust merges keys for the same owner without duplicates and keeps comments', async () => {
+    const e = await env();
+    const a = createKeyPair().publicKey;
+    const b = createKeyPair().publicKey;
+    await mkdir(join(e.home, '.config', 'skillseekr'), { recursive: true });
+    await writeFile(e.configFile, `// mine\n{ "registries": {}, "trust": [{ "owner": "Acme", "public_keys": ["${a}"] }] }\n`);
+    await setup(e.ctx, { yes: true, trust: [`acme=${a}`, `acme=${b}`] });
+    const text = await readFile(e.configFile, 'utf8');
+    expect(text.startsWith('// mine')).toBe(true);
+    expect((parseJsonc(text) as { trust: unknown }).trust).toEqual([{ owner: 'acme', public_keys: [a, b] }]);
+  });
+
+  it('setup --trust with a bad key or spec throws and writes nothing', async () => {
+    const e = await env();
+    await expect(setup(e.ctx, { yes: true, trust: ['acme=ed25519:not-a-key'] })).rejects.toThrow(/invalid public key/);
+    await expect(setup(e.ctx, { yes: true, trust: ['no-equals'] })).rejects.toThrow(/--trust must be/);
+    await expect(stat(e.configFile)).rejects.toThrow();
+    expect(e.claude.calls.filter((c) => /install|add/.test(c))).toEqual([]);
   });
 });
