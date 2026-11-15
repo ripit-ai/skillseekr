@@ -107,7 +107,12 @@ const build = (source: string, ci: boolean) => new RegExp((ci ? caseless(source)
 const DL = String.raw`\b(?:curl|wget)(?:\.exe)?\b`;
 /** A pipe (`|` or `|&`, not `||`). */
 const PIPE_SIGN = String.raw`(?<!\|)\|(?!\|)&?`;
-const PIPE = String.raw`${PIPE_SIGN}\s*`;
+// `\s*(?!\s)` is an atomic run of whitespace: nothing after it can start with whitespace, so it never needs to
+// give any back. Without the guard, a long whitespace run after a pipe made older V8 (Node 22) retry the whole
+// runner/shell alternation at every position while backtracking (~2 µs/char; a 10 MB line took ~50 s).
+const WS = String.raw`\s*(?![^\S\n])`;
+const WS1 = String.raw`\s+(?![^\S\n])`; // the same guard for the separators inside the runner grammar
+const PIPE = String.raw`${PIPE_SIGN}${WS}`;
 /**
  * P2-R14: the words of a pipe segment before the interpreter may only be wrappers, options (`-x`, `--x`, `--x=y`,
  * a bare `--`, optionally followed by one value such as `-u root`), env assignments (`X=y`), numbers or durations
@@ -123,8 +128,8 @@ const CAPS_SRC = String.raw`(?!(?:${WRAPPER_NAMES.join('|').toUpperCase()})(?:[^
 const PLAIN = String.raw`(?:${WRAPPER}|\d+(?:\.\d+)?[smhd]?|${CAPS}|[A-Za-z_]\w*=\S*)`;
 const OPTION = String.raw`(?:--?[^\s=-][^\s=]*(?:=\S*)?|--(?=${H}|$))`;
 const VALUE = String.raw`(?!${PLAIN}(?:${H}|$))[^\s-]\S*`;
-const RUNNER_WORD = String.raw`(?:${PLAIN}|${OPTION}(?:\s+${VALUE})?)`;
-const RUNNER = String.raw`(?:${RUNNER_WORD}\s+){0,64}`;
+const RUNNER_WORD = String.raw`(?:${PLAIN}|${OPTION}(?:${WS1}${VALUE})?)`;
+const RUNNER = String.raw`(?:${RUNNER_WORD}${WS1}){0,64}`;
 const INTERP = String.raw`(?:(?:ba|z|da|k)?sh|python[23]?|node|perl|ruby)`;
 /**
  * P2-R11a: code given on the interpreter's command line (-c/-e/-p) runs the piped download only if it executes
@@ -142,9 +147,9 @@ const RUNS_INPUT = String.raw`(?:exec|eval|compile|system|subprocess|spawn|popen
  */
 const ROOT_OPT = '\u0000ROOT\u0000';
 const USER_VALUE = String.raw`[^\s|;&)-]\S*`;
-const ROOT_OPT_SRC = String.raw`-[A-Za-z]*[si](?:[A-Za-z]*u\s+${USER_VALUE})?`;
-const SUDO_OPTION = String.raw`(?:-u\s+${USER_VALUE}|--user(?:=\S+|\s+${USER_VALUE})|-[A-Za-z]+|--[a-z-]+)`;
-const ROOT_SHELL = String.raw`(?:sudo|doas)(?:\s+${SUDO_OPTION}){0,8}?\s+(?:${ROOT_OPT}|--shell|--login)(?:\s+${SUDO_OPTION}){0,8}${H}*(?=$|[|;&)])`;
+const ROOT_OPT_SRC = String.raw`-[A-Za-z]*[si](?:[A-Za-z]*u${WS1}${USER_VALUE})?`;
+const SUDO_OPTION = String.raw`(?:-u${WS1}${USER_VALUE}|--user(?:=\S+|${WS1}${USER_VALUE})|-[A-Za-z]+|--[a-z-]+)`;
+const ROOT_SHELL = String.raw`(?:sudo|doas)(?:${WS1}${SUDO_OPTION}){0,8}?${WS1}(?:${ROOT_OPT}|--shell|--login)(?:${WS1}${SUDO_OPTION}){0,8}${H}*(?=$|[|;&)])`;
 /**
  * What a download can be piped into to run it: an interpreter (or su), after wrappers, by name or by any path,
  * optionally quoted; a root shell; or `xargs … sh -c` (the input becomes the code, whatever the -c code is). It
@@ -153,7 +158,7 @@ const ROOT_SHELL = String.raw`(?:sudo|doas)(?:\s+${SUDO_OPTION}){0,8}?\s+(?:${RO
  * that ends its line also passes, so the block pre-test still finds a command wrapped onto the next line. More than
  * 64 wrapper words in a row hits the bound and fails closed (matches).
  */
-const SHELL = String.raw`(?=[^|\n]*?(?:sh|python|node|perl|ruby|su|doas)|${H}*$)\s*(?:tee\b[^|\n]*?>\(\s*)?(?:${RUNNER}(?:${ROOT_SHELL}|["']?(?:[^\s/|"']*(?:\/[^\s/|"']+){0,32}\/)?(?:(?<=\bxargs\b[^|\n]{0,1024})(?:ba|z|da|k)?sh${H}+-\w*c\b|${INTERP}${H}+-\w*[cep]\b[^|\n]*?${RUNS_INPUT}|(?:ba|z|da|k)?sh\b(?!${H}+-c\b)|python[23]?\b(?!${H}+-[cm]\b)|node\b(?!${H}+-[ep]\b)|perl\b(?!${H}+-\w*e)|ruby\b(?!${H}+-e\b)|su\b(?!${H}+-c\b)|\$\{?SHELL\b))|(?:${RUNNER_WORD}\s+){65})`;
+const SHELL = String.raw`(?=[^|\n]*?(?:sh|python|node|perl|ruby|su|doas)|${H}*$)${WS}(?:tee\b[^|\n]*?>\(\s*)?(?:${RUNNER}(?:${ROOT_SHELL}|["']?(?:[^\s/|"']*(?:\/[^\s/|"']+){0,32}\/)?(?:(?<=\bxargs\b[^|\n]{0,1024})(?:ba|z|da|k)?sh${H}+-\w*c\b|${INTERP}${H}+-\w*[cep]\b[^|\n]*?${RUNS_INPUT}|(?:ba|z|da|k)?sh\b(?!${H}+-c\b)|python[23]?\b(?!${H}+-[cm]\b)|node\b(?!${H}+-[ep]\b)|perl\b(?!${H}+-\w*e)|ruby\b(?!${H}+-e\b)|su\b(?!${H}+-c\b)|\$\{?SHELL\b))|(?:${RUNNER_WORD}${WS1}){65})`;
 const PS_DL = String.raw`\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|curl(?:\.exe)?|wget(?:\.exe)?)\b`;
 const IEX = String.raw`\b(?:iex|Invoke-Expression)\b`;
 const SUBST = String.raw`["']?(?:\$\(|\x60)\s*${DL}`; // "$(curl" or `curl
