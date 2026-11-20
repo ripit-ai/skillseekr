@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import type { Ctx } from '../context.js';
@@ -10,7 +9,8 @@ import { fetchHttpBody, invalidSkillName } from '../sources/http.js';
 import type { IncludeEntry, Problem } from '../types.js';
 import { githubFolder, httpFolder, includeFile, STAGING } from './layout.js';
 import { acquireLock, LockBusyError } from './lock.js';
-import { MANIFEST_VERSION, manifestFile, readManifest, writeManifest, type IncludeRecord, type Manifest, type ManifestSkill, type SourceRecord } from './manifest.js';
+import { configHash, MANIFEST_VERSION, manifestFile, readManifest, writeManifest, type IncludeRecord, type Manifest, type ManifestSkill, type SourceRecord } from './manifest.js';
+export { configHash } from './manifest.js';
 import { cleanLeftovers, prune, removeOld, rollBack, swapIn } from './swap.js';
 import { textHash, verifyFolders } from './verify.js';
 
@@ -26,8 +26,6 @@ export const pullHooks = {
 /** Filesystem steps of the swap, replaceable in tests to inject failures. */
 export const pullFs = { swapIn, writeManifest };
 
-/** SHA-256 (hex) of the config file text an update resolved. */
-export const configHash = (text: string): string => createHash('sha256').update(text).digest('hex');
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const err = (code: string, message: string): Problem => ({ level: 'error', code, message });

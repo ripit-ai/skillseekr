@@ -13,11 +13,13 @@ export interface RegistryView {
 
 /**
  * The manifest's problems as reads report them. A source whose last update failed but which kept its previous
- * copy is served stale: its fetch error becomes a source/stale warning (the message, with any auth hint, is kept).
+ * copy is served stale: its fetch error (source/*) becomes a source/stale warning (the message, with any auth hint,
+ * is kept).
  */
 export function readProblems(m: Manifest): Problem[] {
   const kept = new Set(m.sources.filter((s) => s.stale && s.folder).map((s) => s.name));
-  return m.problems.map((p) => (p.level === 'error' && p.registry !== undefined && kept.has(p.registry)
+  // Only fetch failures (source/*): a library/* error (a security rejection, a failed write) stays an error.
+  return m.problems.map((p) => (p.level === 'error' && p.code.startsWith('source/') && p.registry !== undefined && kept.has(p.registry)
     ? { ...p, level: 'warning', code: 'source/stale', message: `${p.message}; using the library's copy from the last successful update, which may be stale` }
     : p));
 }

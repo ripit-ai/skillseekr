@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { DiscoveredSkill } from '../catalog/discover.js';
@@ -21,6 +21,9 @@ export interface Manifest {
   version: 1; updatedAt: string; configHash: string;
   sources: SourceRecord[]; includes: IncludeRecord[]; overrides: Override[]; problems: Problem[];
 }
+
+/** SHA-256 (hex) of the config file text an update resolved. */
+export const configHash = (text: string): string => createHash('sha256').update(text).digest('hex');
 
 export const manifestFile = (libDir: string): string => join(libDir, 'manifest.json');
 

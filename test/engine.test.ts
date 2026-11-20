@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createEngine } from '../src/engine.js';
@@ -8,6 +8,10 @@ import { fakeGithub, type FakeSpec } from './helpers/fakeGithub.js';
 import { fakeHttp, type FakeRoute } from './helpers/fakeHttp.js';
 import { tmpDir } from './helpers/tmp.js';
 import { pull } from './helpers/library.js';
+import { pullHooks } from '../src/library/pull.js';
+
+const realHook = pullHooks.beforeSwap;
+afterEach(() => { pullHooks.beforeSwap = realHook; });
 
 const API = 'https://api.github.com';
 const SHA1 = 'a'.repeat(40);
@@ -167,6 +171,19 @@ describe('engine', () => {
     const [v] = (await engine.registries()).registries;
     expect(v).toMatchObject({ name: 'r', stale: true, skillCount: 1, fetchedAt: new Date(1_700_000_000_000).toISOString() });
     expect(v).not.toHaveProperty('cacheAgeSeconds');
+  });
+
+  it('a source the security hook rejected keeps its previous copy, but reads still report library/rejected as an error', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await s.write({ r: gh('r') });
+    await pull(s.ctx);
+    s.repos['o/r'] = { refs: { main: SHA2 }, commits: { [SHA2]: { 'skills/a/SKILL.md': skill('a'), 'skills/n/SKILL.md': skill('n') } } };
+    pullHooks.beforeSwap = async () => ({ reject: ['r'] });
+    await pull(s.ctx);
+    const cat = await createEngine(s.offline).catalog();
+    expect(cat.skills.map((x) => [x.id, x.sha])).toEqual([['a', SHA1]]);
+    expect(cat.stale).toBe(true);
+    expect(cat.problems).toEqual([expect.objectContaining({ level: 'error', code: 'library/rejected', registry: 'r' })]);
   });
 
   it('an unreachable registry is a problem with registry and via; others still load', async () => {
