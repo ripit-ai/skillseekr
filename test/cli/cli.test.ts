@@ -6,6 +6,7 @@ import { main } from '../../src/cli/main.js';
 import type { Ctx } from '../../src/context.js';
 import { fakeGithub, type FakeSpec } from '../helpers/fakeGithub.js';
 import { tmpDir } from '../helpers/tmp.js';
+import { pull } from '../helpers/library.js';
 
 const API = 'https://api.github.com';
 const SHA = 'a'.repeat(40);
@@ -17,12 +18,15 @@ const repos = (): FakeSpec => ({
   'o/two': { refs: { main: SHA }, commits: { [SHA]: { 'skills/other/dup/SKILL.md': skill('dup'), 'skills/alpha/SKILL.md': skill('alpha', 'TWO') } } },
 });
 
+/** Writes the config (registries, or raw text) and, for registries, pulls the library. */
 async function setup(o: { registries?: Record<string, unknown>; repos?: FakeSpec; raw?: string } = {}) {
   const dir = await tmpDir();
   const github = fakeGithub(o.repos ?? repos());
   const path = join(dir, 'config.jsonc');
+  const lib = join(dir, 'library');
+  const config = (registries: Record<string, unknown>) => JSON.stringify({ library: { dir: lib }, registries });
   if (o.raw !== undefined) await writeFile(path, o.raw);
-  else if (o.registries) await writeFile(path, JSON.stringify({ cache: { dir: join(dir, 'cache') }, registries: o.registries }));
+  else if (o.registries) await writeFile(path, config(o.registries));
   const cwd = join(dir, 'project');
   await mkdir(cwd);
   await mkdir(join(dir, 'home'));
@@ -36,7 +40,8 @@ async function setup(o: { registries?: Record<string, unknown>; repos?: FakeSpec
     const code = await main(argv, { ctx, io: { out: (s) => out.push(s), err: (s) => err.push(s) } });
     return { code, out: out.join(''), err: err.join('') };
   };
-  return { run, ctx, github, dir, cwd, path };
+  if (o.registries) await pull(ctx);
+  return { run, ctx, github, dir, cwd, path, lib, config };
 }
 
 describe('cli', () => {
@@ -183,9 +188,10 @@ describe('cli', () => {
   });
 
   it('registries prints the resolved list with via; add/remove edit the config keeping comments', async () => {
-    const raw = `{\n  // keep me\n  "cache": { "dir": "CACHE" },\n  "registries": {\n    "one": { "type": "github", "owner": "o", "repo": "one", "skills_dir": "skills", "ref": "main" }\n  }\n}\n`;
+    const raw = `{\n  // keep me\n  "library": { "dir": "LIB" },\n  "registries": {\n    "one": { "type": "github", "owner": "o", "repo": "one", "skills_dir": "skills", "ref": "main" }\n  }\n}\n`;
     const s = await setup({ raw });
-    await writeFile(s.path, raw.replace('CACHE', join(s.dir, 'cache')));
+    await writeFile(s.path, raw.replace('LIB', s.lib));
+    await pull(s.ctx);
     const list = await s.run('registries');
     expect(list.code).toBe(0);
     expect(list.out).toMatch(/^one\s+github\s+one\s+2\s+main\s+aaaaaaa/m);
@@ -196,6 +202,11 @@ describe('cli', () => {
     expect(text).toContain('// keep me');
     expect(text).toContain('"mine"');
     expect(text).toContain('"gh_cli"');
+    // The edit reaches reads only after an update (Review Focus 1).
+    const before = JSON.parse((await s.run('--json', 'registries')).out);
+    expect(before.registries.map((r: { name: string }) => r.name)).toEqual(['one']);
+    expect(before.problems.map((p: { code: string }) => p.code)).toEqual(['library/config-changed']);
+    await pull(s.ctx);
     const j = JSON.parse((await s.run('--json', 'registries')).out);
     expect(j.registries.map((r: { name: string }) => r.name)).toEqual(['one', 'mine']);
 
@@ -240,22 +251,15 @@ describe('cli', () => {
     expect(JSON.parse(await readFile(s.path, 'utf8')).registries.one).toMatchObject({ type: 'http', skill_name: 'x' });
   });
 
-  it('sync forces a reload', async () => {
-    const s = await setup({ registries: { one: gh('one') } });
-    await s.run('search', 'alpha');
-    const before = s.github.calls.filter((c) => c.includes('/commits/')).length;
-    const r = await s.run('sync');
-    expect(r.code).toBe(0);
-    expect(r.out).toBe('synced 1 registries, 2 skills, 0 problems\n');
-    expect(s.github.calls.filter((c) => c.includes('/commits/')).length).toBeGreaterThan(before);
-  });
-
   it('stale catalog prints a one-line warning to stderr', async () => {
     const s = await setup({ registries: { one: gh('one') } });
-    await s.run('sync');
     s.github.offline(true);
-    const r = await s.run('sync');
+    await pull(s.ctx); // fails for "one", which keeps its previous copy
+    const calls = s.github.calls.length;
+    const r = await s.run('search', 'alpha');
     expect(r.code).toBe(0);
+    expect(r.out).toMatch(/^alpha\s+one/m);
+    expect(s.github.calls).toHaveLength(calls);
     expect(r.err.trim().split('\n')).toEqual(["warning: catalog may be stale (offline or failing sources); run 'skillseekr doctor'"]);
     const j = await s.run('--json', 'search', 'alpha');
     expect(() => JSON.parse(j.out)).not.toThrow();
@@ -276,7 +280,8 @@ describe('cli', () => {
   it('--config sets SKILLSEEKR_CONFIG on the ctx without touching process.env', async () => {
     const s = await setup();
     const other = join(s.dir, 'other.jsonc');
-    await writeFile(other, JSON.stringify({ cache: { dir: join(s.dir, 'cache') }, registries: { one: gh('one') } }));
+    await writeFile(other, s.config({ one: gh('one') }));
+    await pull({ ...s.ctx, env: { ...s.ctx.env, SKILLSEEKR_CONFIG: other } });
     const before = process.env.SKILLSEEKR_CONFIG;
     const r = await s.run('--config', other, 'search', 'alpha');
     expect(r.code).toBe(0);
@@ -307,8 +312,8 @@ describe('cli', () => {
     const s = await setup({ registries: { one: gh('one') } });
     expect((await s.run('update', 'ghost')).code).toBe(1);
     await s.run('install', 'cat/dup');
-    const path = join(s.dir, 'config.jsonc');
-    await writeFile(path, JSON.stringify({ cache: { dir: join(s.dir, 'cache') }, registries: { two: gh('two') } }));
+    await writeFile(s.path, s.config({ two: gh('two') }));
+    await pull(s.ctx);
     const r = await s.run('update', 'dup');
     expect(r.code).toBe(0);
     expect(r.out).toMatch(/dup\s+missing-from-catalog/);

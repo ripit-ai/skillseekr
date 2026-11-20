@@ -10,10 +10,6 @@ export interface Override { kind: 'registry' | 'skill'; key: string; replaced: {
 export interface IncludeInfo { name: string; via: string[]; entry: IncludeEntry; sha?: string; stale: boolean; policy: boolean /* entry.policy && depth===1 */ }
 export interface Resolution { registries: ResolvedRegistry[]; includes: IncludeInfo[]; overrides: Override[]; problems: Problem[]; stale: boolean }
 
-/** Effective TTL for one registry: 0 (re-check every load) when caching is off globally or for the entry. */
-export const ttlFor = (config: Pick<Config, 'cache'>, entry: { cache_enabled: boolean }): number =>
-  config.cache.enabled && entry.cache_enabled ? config.cache.ttlSeconds : 0;
-
 export type IncludeLoad = { text: string; sha?: string; stale: boolean; problems: Problem[] } | { error: Problem };
 /** Supplies the text of one included registries file. `trusted` is true iff the entry is declared in the local config. */
 export type IncludeLoader = (entry: IncludeEntry, trusted: boolean) => Promise<IncludeLoad>;

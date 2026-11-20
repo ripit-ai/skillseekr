@@ -1,19 +1,13 @@
-import { randomBytes } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, posix, win32 } from 'node:path';
+import { mkdir, rm } from 'node:fs/promises';
+import { dirname, posix, win32 } from 'node:path';
 import { x as extract, type ReadEntry } from 'tar';
 import { authHeaders } from '../auth.js';
 import type { Ctx } from '../context.js';
-import { isFresh, readState, writeState } from '../cache/state.js';
 import { NetworkError, TooLargeError, type HttpResponse } from '../net/http.js';
-import type { Auth, CacheSettings, Problem } from '../types.js';
-
-export interface FetchOpts { force: boolean; trusted: boolean; ttlSeconds: number /* 0 when caching disabled */ }
-export interface TreeResult { sha: string; root: string /* abs dir = repo root at sha */; stale: boolean; problems: Problem[] }
+import type { Auth, Problem } from '../types.js';
 
 interface Repo { owner: string; repo: string; ref: string; auth: Auth }
-interface RefState { sha: string; checkedAt: number }
-/** A failed request or download. Any failure falls back to an older cached copy when one exists (R8). */
+/** A failed request or download. */
 interface Failure { error: Problem }
 
 export const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
@@ -114,7 +108,7 @@ function getter(o: Repo, headers: () => Promise<Record<string, string>>, ctx: Ct
 
 const isFailure = (r: unknown): r is Failure => typeof r === 'object' && r !== null && 'error' in r;
 
-/** Request plumbing shared by the cached and the plain paths: base URL, lazy auth (R9), problems, and R10 error context. */
+/** Request plumbing shared by the fetchers: base URL, lazy auth (R9), problems, and R10 error context. */
 function session(o: Repo, trusted: boolean, ctx: Ctx) {
   const problems: Problem[] = [];
   const base = `${ctx.githubApi.replace(/\/+$/, '')}/repos/${o.owner}/${o.repo}`;
@@ -122,7 +116,7 @@ function session(o: Repo, trusted: boolean, ctx: Ctx) {
   let auth: Promise<Record<string, string>> | undefined;
   const headers = () => (auth ??= authHeaders(o.auth, { url: base, kind: 'github' }, { trusted }, ctx)
     .then((a) => { if (a.problem) problems.push(a.problem); return a.headers; }));
-  // Surface why auth failed (missing env var, untrusted entry) on an error with no cache to fall back to (R10).
+  // Surface why auth failed (missing env var, untrusted entry) on an error (R10).
   const err = (e: Problem): { error: Problem } => ({
     error: problems.length ? { ...e, message: `${e.message} (auth: ${problems.map((p) => p.message).join('; ')})` } : e,
   });
@@ -138,69 +132,7 @@ async function resolveRef(o: Repo, base: string, get: Get): Promise<string | Fai
   return FULL_SHA_RE.test(sha) ? sha : fail('source/bad-response', `GitHub repo ${slug(o)}: resolving ref "${o.ref}" did not return a commit sha`);
 }
 
-// ---------- the shared flow: resolve the ref, use or fill the cache, fall back to stale ----------
-
-async function withSha<T>(
-  o: Repo, opts: FetchOpts, cache: CacheSettings, ctx: Ctx,
-  cached: (sha: string) => Promise<T | undefined>,
-  fetchNew: (sha: string, get: Get) => Promise<T | Failure>,
-): Promise<{ sha: string; value: T; stale: boolean; problems: Problem[] } | { error: Problem }> {
-  const bad = invalidRepo(o);
-  if (bad) return { error: bad };
-  const { base, problems, get, err } = session(o, opts.trusted, ctx);
-
-  const stale = async (prev: RefState | undefined, why: Failure) => {
-    const value = prev ? await cached(prev.sha) : undefined;
-    if (!prev || value === undefined) return undefined;
-    problems.push({
-      level: 'warning', code: 'source/stale',
-      message: `${why.error.message}; using the cached copy of ${slug(o)} at ${short(prev.sha)} (ref "${o.ref}"), which may be stale`,
-    });
-    return { sha: prev.sha, value, stale: true, problems };
-  };
-
-  let sha = o.ref;
-  let stateKey: string | undefined;
-  let prev: RefState | undefined;
-  if (!isShaRef(o.ref)) {
-    const key = `ref/${o.owner}/${o.repo}/${o.ref}`;
-    const rec = await readState<RefState>(cache.dir, key);
-    prev = rec && typeof rec.sha === 'string' && FULL_SHA_RE.test(rec.sha) && typeof rec.checkedAt === 'number' ? rec : undefined;
-    if (prev && !opts.force && isFresh(prev.checkedAt, opts.ttlSeconds, ctx.now())) {
-      sha = prev.sha;
-    } else {
-      const got = await resolveRef(o, base, get);
-      if (isFailure(got)) return (await stale(prev, got)) ?? err(got.error);
-      sha = got;
-      stateKey = key;
-    }
-  }
-
-  let value = await cached(sha);
-  if (value === undefined) {
-    const got = await fetchNew(sha, get);
-    if (isFailure(got)) {
-      // Only an older sha can be cached here (this sha's copy was just found missing).
-      const older = prev && prev.sha !== sha ? await stale(prev, got) : undefined;
-      return older ?? err(got.error);
-    }
-    value = got;
-  }
-  if (stateKey) {
-    try {
-      await writeState(cache.dir, stateKey, { sha, checkedAt: ctx.now() } satisfies RefState);
-    } catch (e) {
-      problems.push({ level: 'warning', code: 'cache/write-failed', message: `could not record ref "${o.ref}" of ${slug(o)} in the cache: ${(e as Error).message}` });
-    }
-  }
-  return { sha, value, stale: false, problems };
-}
-
 // ---------- trees ----------
-
-async function isDir(p: string): Promise<boolean> {
-  try { return (await stat(p)).isDirectory(); } catch { return false; }
-}
 
 export class ExtractTooLargeError extends Error {
   override name = 'ExtractTooLargeError';
@@ -244,80 +176,7 @@ async function extractInto(o: Repo, body: Buffer, dir: string): Promise<Failure 
   return undefined;
 }
 
-/**
- * Extract into a unique ".tmp-*" sibling, then rename to <sha>/: a tree is visible only once complete.
- * If another process won the race the rename fails (EEXIST/ENOTEMPTY/EPERM), and its tree is used.
- */
-async function storeTree(o: Repo, body: Buffer, repoDir: string, root: string): Promise<string | Failure> {
-  let tmp: string;
-  try {
-    await mkdir(repoDir, { recursive: true, mode: 0o700 });
-    tmp = await mkdtemp(join(repoDir, '.tmp-'));
-  } catch (e) {
-    return fail('source/cache-error', `cannot write the cache for GitHub repo ${slug(o)}: ${(e as Error).message}`);
-  }
-  const bad = await extractInto(o, body, tmp);
-  if (bad) return bad;
-  try {
-    await rename(tmp, root);
-  } catch (e) {
-    await cleanup(tmp);
-    if (!(await isDir(root))) {
-      return fail('source/cache-error', `cannot write the cache for GitHub repo ${slug(o)}: ${(e as Error).message}`);
-    }
-  }
-  return root;
-}
-
-export async function materializeGithub(
-  o: { owner: string; repo: string; ref: string; auth: Auth },
-  opts: FetchOpts, cache: CacheSettings, ctx: Ctx,
-): Promise<TreeResult | { error: Problem }> {
-  const repoDir = join(cache.dir, 'github', o.owner, o.repo);
-  const r = await withSha(o, opts, cache, ctx,
-    async (sha) => (await isDir(join(repoDir, sha)) ? join(repoDir, sha) : undefined),
-    async (sha, get) => {
-      const res = await get(`${ctx.githubApi.replace(/\/+$/, '')}/repos/${o.owner}/${o.repo}/tarball/${sha}`,
-        'application/vnd.github+json', `downloading the tarball for ${short(sha)}`);
-      return isFailure(res) ? res : storeTree(o, res.body, repoDir, join(repoDir, sha));
-    });
-  if ('error' in r) return r;
-  return { sha: r.sha, root: r.value, stale: r.stale, problems: r.problems };
-}
-
-// ---------- single files ----------
-
-export async function readGithubFile(
-  o: { owner: string; repo: string; ref: string; path: string; auth: Auth },
-  opts: FetchOpts, cache: CacheSettings, ctx: Ctx,
-): Promise<{ sha: string; text: string; stale: boolean; problems: Problem[] } | { error: Problem }> {
-  const segs = safeSegments(o.path);
-  if (!segs) return { error: invalidPath(o) };
-  const fileAt = (sha: string) => join(cache.dir, 'files', o.owner, o.repo, sha, ...segs);
-  const r = await withSha(o, opts, cache, ctx,
-    async (sha) => { try { return await readFile(fileAt(sha), 'utf8'); } catch { return undefined; } },
-    async (sha, get) => {
-      const path = segs.map(encodeURIComponent).join('/');
-      const res = await get(`${ctx.githubApi.replace(/\/+$/, '')}/repos/${o.owner}/${o.repo}/contents/${path}?ref=${sha}`,
-        'application/vnd.github.raw', `reading ${o.path} at ${short(sha)}`);
-      if (isFailure(res)) return res;
-      const file = fileAt(sha);
-      const tmp = `${file}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`;
-      try {
-        await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-        await writeFile(tmp, res.body);
-        await rename(tmp, file);
-      } catch {
-        await cleanup(tmp);
-        // Not cached this time; the content is still good to return.
-      }
-      return res.body.toString('utf8');
-    });
-  if ('error' in r) return r;
-  return { sha: r.sha, text: r.value, stale: r.stale, problems: r.problems };
-}
-
-// ---------- plain fetchers (no cache, no stale fallback: the library pull decides what to keep) ----------
+// ---------- fetchers (no persistence, no stale fallback: the library pull decides what to keep) ----------
 
 /** Resolve the ref and download its tarball into a new dir. A sha equal to knownSha returns unchanged with no download. */
 export async function fetchGithubTree(

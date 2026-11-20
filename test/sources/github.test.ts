@@ -5,12 +5,12 @@ import { existsSync } from 'node:fs';
 import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import {
-  extractTarball, ExtractTooLargeError, fetchGithubFile, fetchGithubTree, invalidRepo, isShaRef, materializeGithub, readGithubFile, type FetchOpts,
+  extractTarball, ExtractTooLargeError, fetchGithubFile, fetchGithubTree, invalidRepo, isShaRef,
 } from '../../src/sources/github.js';
 import { fetchHttp, NetworkError, type Http, type HttpResponse } from '../../src/net/http.js';
 import { resetGhTokenCache } from '../../src/auth.js';
 import type { Ctx, Exec } from '../../src/context.js';
-import type { Auth, CacheSettings, Problem } from '../../src/types.js';
+import type { Auth, Problem } from '../../src/types.js';
 import { buildTarGz, fakeGithub, listTar, type FakeFile, type FakeSpec } from '../helpers/fakeGithub.js';
 import { tmpDir } from '../helpers/tmp.js';
 
@@ -24,7 +24,6 @@ const FILES: Record<string, FakeFile> = {
   'evil-link': { symlink: '/etc/passwd' },
 };
 const REAL_FILES = Object.keys(FILES).filter((k) => typeof FILES[k] === 'string');
-const TTL = 3600;
 
 const noExec: Exec = async () => ({ code: 1, stdout: '', stderr: 'not logged in' });
 
@@ -34,17 +33,14 @@ async function setup(o: { token?: string; exec?: Exec; http?: (fake: Http) => Ht
     'acme/skills': { refs: { main: SHA1 }, commits: { [SHA1]: { ...FILES }, [SHA2]: { 'README.md': 'v2\n' } }, token: o.token },
   };
   const fake = fakeGithub(spec);
-  let now = 1_700_000_000_000;
   const ctx: Ctx = {
     env: {}, home: join(dir, 'home'), cwd: dir, http: o.http ? o.http(fake.http) : fake.http,
-    exec: o.exec ?? noExec, now: () => now, githubApi: 'https://api.github.com',
+    exec: o.exec ?? noExec, now: () => 1_700_000_000_000, githubApi: 'https://api.github.com',
   };
-  const cache: CacheSettings = { enabled: true, ttlSeconds: TTL, dir: join(dir, 'cache') };
-  return { dir, spec, fake, ctx, cache, advance: (s: number) => { now += s * 1000; } };
+  return { dir, spec, fake, ctx };
 }
 
 const src = (ref = 'main', auth: Auth = { type: 'none' }) => ({ owner: 'acme', repo: 'skills', ref, auth });
-const opts = (o: Partial<FetchOpts> = {}): FetchOpts => ({ force: false, trusted: true, ttlSeconds: TTL, ...o });
 const commitCalls = (calls: string[]) => calls.filter((c) => c.includes('/commits/')).length;
 const tarballCalls = (calls: string[]) => calls.filter((c) => c.includes('/tarball/')).length;
 
@@ -87,169 +83,72 @@ describe('isShaRef', () => {
   });
 });
 
-describe('materializeGithub', () => {
-  it('branch ref resolves to sha, extracts tree to <cache>/github/<owner>/<repo>/<sha>/ without the top folder', async () => {
-    const { ctx, cache } = await setup();
-    const r = ok(await materializeGithub(src(), opts(), cache, ctx));
-    expect(r.sha).toBe(SHA1);
-    expect(r.stale).toBe(false);
-    expect(r.root).toBe(join(cache.dir, 'github', 'acme', 'skills', SHA1));
-    for (const f of REAL_FILES) expect(await readFile(join(r.root, f), 'utf8')).toBe(FILES[f]);
-    expect(existsSync(join(r.root, `acme-skills-${SHA1.slice(0, 7)}`))).toBe(false);
-    expect(await readdir(join(cache.dir, 'github', 'acme', 'skills'))).toEqual([SHA1]);
-  });
-
-  it('sha ref is never re-resolved', async () => {
-    const { ctx, cache, fake } = await setup();
-    const a = ok(await materializeGithub(src(SHA1), opts({ ttlSeconds: 0 }), cache, ctx));
-    const b = ok(await materializeGithub(src(SHA1), opts({ ttlSeconds: 0 }), cache, ctx));
-    expect(a.root).toBe(b.root);
-    expect(commitCalls(fake.calls)).toBe(0);
-    expect(tarballCalls(fake.calls)).toBe(1);
-  });
-
-  it('branch ref is re-checked only after ttl', async () => {
-    const { ctx, cache, fake, spec, advance } = await setup();
-    ok(await materializeGithub(src(), opts(), cache, ctx));
-    expect(commitCalls(fake.calls)).toBe(1);
-    spec['acme/skills'].refs.main = SHA2;
-    advance(TTL - 1);
-    const fresh = ok(await materializeGithub(src(), opts(), cache, ctx));
-    expect(commitCalls(fake.calls)).toBe(1);
-    expect(fresh.sha).toBe(SHA1);
-    advance(2); // now ttl + 1 after the first check
-    const rechecked = ok(await materializeGithub(src(), opts(), cache, ctx));
-    expect(commitCalls(fake.calls)).toBe(2);
-    expect(rechecked.sha).toBe(SHA2);
-    expect(await readFile(join(rechecked.root, 'README.md'), 'utf8')).toBe('v2\n');
-  });
-
-  it('ttlSeconds 0 re-checks every time but reuses the stored tree', async () => {
-    const { ctx, cache, fake } = await setup();
-    ok(await materializeGithub(src(), opts({ ttlSeconds: 0 }), cache, ctx));
-    ok(await materializeGithub(src(), opts({ ttlSeconds: 0 }), cache, ctx));
-    expect(commitCalls(fake.calls)).toBe(2);
-    expect(tarballCalls(fake.calls)).toBe(1);
-  });
-
-  it('force re-checks a branch ref regardless of ttl', async () => {
-    const { ctx, cache, fake } = await setup();
-    ok(await materializeGithub(src(), opts(), cache, ctx));
-    ok(await materializeGithub(src(), opts({ force: true }), cache, ctx));
-    expect(commitCalls(fake.calls)).toBe(2);
-  });
-
-  it('offline with a previous resolution returns the cached tree with stale: true and a warning problem', async () => {
-    const { ctx, cache, fake, advance } = await setup();
-    const first = ok(await materializeGithub(src(), opts(), cache, ctx));
-    advance(TTL + 1);
-    fake.offline(true);
-    const r = ok(await materializeGithub(src(), opts(), cache, ctx));
-    expect(r).toMatchObject({ sha: SHA1, root: first.root, stale: true });
-    expect(r.problems).toHaveLength(1);
-    expect(r.problems[0]).toMatchObject({ level: 'warning', code: 'source/stale' });
-    expect(r.problems[0].message).toContain('acme/skills');
-    expect(r.problems[0].registry).toBeUndefined();
-  });
-
-  it('a 5xx on re-check with a previous resolution is also stale', async () => {
-    let down = false;
-    const { ctx, cache } = await setup({ http: (f) => stub(() => (down ? res(502, 'bad gateway') : undefined), f) });
-    ok(await materializeGithub(src(), opts(), cache, ctx));
-    down = true;
-    const r = ok(await materializeGithub(src(), opts({ force: true }), cache, ctx));
-    expect(r.stale).toBe(true);
-    expect(r.problems.map((p) => p.code)).toEqual(['source/stale']);
-  });
-
-  it('offline with no previous resolution returns { error: { code: "source/unreachable" } }', async () => {
-    const { ctx, cache, fake } = await setup();
-    fake.offline(true);
-    const e = err(await materializeGithub(src(), opts(), cache, ctx));
-    expect(e).toMatchObject({ level: 'error', code: 'source/unreachable' });
-    expect(e.message).toContain('acme/skills');
-    const e2 = err(await materializeGithub(src(SHA1), opts(), cache, ctx));
-    expect(e2.code).toBe('source/unreachable');
-  });
+describe('fetchGithubTree: errors, auth and extraction', () => {
+  const into = (t: { dir: string }) => join(t.dir, 'out');
+  const fetchTree = (t: Awaited<ReturnType<typeof setup>>, ref = 'main', auth: Auth = { type: 'none' }) =>
+    fetchGithubTree(src(ref, auth), { trusted: true }, into(t), t.ctx);
 
   it('404/401/403 returns error code "source/no-access" whose message names owner/repo and suggests "gh auth login" when auth is gh_cli', async () => {
-    const { ctx, cache } = await setup({ token: 'sekrit' });
-    const none = err(await materializeGithub(src(), opts(), cache, ctx));
+    const t = await setup({ token: 'sekrit' });
+    const none = err(await fetchTree(t));
     expect(none).toMatchObject({ level: 'error', code: 'source/no-access' });
     expect(none.message).toContain('acme/skills');
-    const gh = err(await materializeGithub(src('main', { type: 'gh_cli' }), opts(), cache, ctx));
+    const gh = err(await fetchTree(t, 'main', { type: 'gh_cli' }));
     expect(gh.code).toBe('source/no-access');
     expect(gh.message).toContain('acme/skills');
     expect(gh.message).toContain('gh auth login');
 
     for (const status of [401, 403]) {
       const s = await setup({ http: (f) => stub(() => res(status, '{"message":"Bad credentials"}'), f) });
-      const e = err(await materializeGithub(src('main', { type: 'gh_cli' }), opts(), s.cache, s.ctx));
+      const e = err(await fetchTree(s, 'main', { type: 'gh_cli' }));
       expect(e.code).toBe('source/no-access');
       expect(e.message).toContain('acme/skills');
       expect(e.message).toContain('gh auth login');
     }
   });
 
-  it('a rate-limit 403 (x-ratelimit-remaining: 0) gives "source/rate-limited"', async () => {
-    const { ctx, cache } = await setup({
+  it('a rate-limit 403 (x-ratelimit-remaining: 0) gives "source/rate-limited"; a 5xx gives "source/unreachable"', async () => {
+    const t = await setup({
       http: (f) => stub(() => res(403, '{"message":"API rate limit exceeded"}', { 'x-ratelimit-remaining': '0' }), f),
     });
-    const e = err(await materializeGithub(src(), opts(), cache, ctx));
+    const e = err(await fetchTree(t));
     expect(e).toMatchObject({ level: 'error', code: 'source/rate-limited' });
     expect(e.message).toContain('acme/skills');
+    const u = await setup({ http: (f) => stub(() => res(502, 'bad gateway'), f) });
+    expect(err(await fetchTree(u)).code).toBe('source/unreachable');
   });
 
   it('gh_cli sends the gh token to the API and reaches a private repo', async () => {
     const exec: Exec = async () => ({ code: 0, stdout: 'sekrit\n', stderr: '' });
-    const { ctx, cache } = await setup({ token: 'sekrit', exec });
-    const r = ok(await materializeGithub(src('main', { type: 'gh_cli' }), opts(), cache, ctx));
-    expect(r.sha).toBe(SHA1);
+    const t = await setup({ token: 'sekrit', exec });
+    expect(ok(await fetchTree(t, 'main', { type: 'gh_cli' })).sha).toBe(SHA1);
   });
 
   it('an unknown ref names owner/repo and the ref', async () => {
-    const { ctx, cache } = await setup();
-    const e = err(await materializeGithub(src('no-such-branch'), opts(), cache, ctx));
+    const t = await setup();
+    const e = err(await fetchTree(t, 'no-such-branch'));
     expect(e.code).toBe('source/ref-not-found');
     expect(e.message).toContain('acme/skills');
     expect(e.message).toContain('no-such-branch');
   });
 
-  it('rejects owner/repo/ref values that could escape the cache or the API path, without any request', async () => {
-    const { ctx, cache, fake } = await setup();
+  it('rejects owner/repo/ref values that could escape a folder or the API path, without any request', async () => {
+    const t = await setup();
     for (const bad of [
       { owner: '..', repo: 'skills', ref: 'main' },
       { owner: 'acme', repo: '../x', ref: 'main' },
       { owner: 'acme', repo: 'skills', ref: '../../x' },
       { owner: 'acme', repo: 'skills', ref: 'a//b' },
     ]) {
-      const e = err(await materializeGithub({ ...bad, auth: { type: 'none' } }, opts(), cache, ctx));
+      const e = err(await fetchGithubTree({ ...bad, auth: { type: 'none' } }, { trusted: true }, into(t), t.ctx));
       expect(e.code).toBe('source/invalid');
     }
-    expect(fake.calls).toEqual([]);
-  });
-
-  it('a tarball over 100 MB gives "source/too-large"', async () => {
-    const big = Buffer.alloc(100 * 1024 * 1024 + 1);
-    const { ctx, cache } = await setup({
-      http: (f) => ({ async get(url, h) { return url.includes('/tarball/') ? { status: 200, headers: {}, body: big } : f.get(url, h); } }),
-    });
-    const e = err(await materializeGithub(src(), opts(), cache, ctx));
-    expect(e.code).toBe('source/too-large');
-    expect(e.message).toContain('acme/skills');
-  });
-
-  it('a corrupt tarball gives "source/bad-archive" and leaves no tree or temp dir', async () => {
-    const { ctx, cache } = await setup({
-      http: (f) => stub((url) => (url.includes('/tarball/') ? res(200, 'this is not a tarball') : undefined), f),
-    });
-    const e = err(await materializeGithub(src(), opts(), cache, ctx));
-    expect(e.code).toBe('source/bad-archive');
-    expect(await readdir(join(cache.dir, 'github', 'acme', 'skills'))).toEqual([]);
+    expect(t.fake.calls).toEqual([]);
   });
 
   it('tar entries with ../ or absolute paths are skipped; symlinks and hard links are not created', async () => {
-    const { dir, ctx, cache } = await setup();
+    const t = await setup();
+    const { dir, ctx } = t;
     const top = `acme-skills-${SHA1.slice(0, 7)}`;
     const absTarget = join(dir, 'abs-evil');
     const hostile = buildTarGz([
@@ -274,195 +173,51 @@ describe('materializeGithub', () => {
     expect(entries.filter((e) => e.type === 'Link').map((e) => e.linkpath)).toEqual(['/etc/passwd', `${top}/ok.txt`]);
 
     ctx.http = stub((url) => (url.includes('/tarball/') ? { status: 200, headers: {}, body: hostile } : undefined), ctx.http);
-    const r = ok(await materializeGithub(src(), opts(), cache, ctx));
-    expect(await readFile(join(r.root, 'ok.txt'), 'utf8')).toBe('ok');
+    const root = into(t);
+    ok(await fetchTree(t));
+    expect(await readFile(join(root, 'ok.txt'), 'utf8')).toBe('ok');
 
-    // Nothing anywhere in the test dir besides the cache's tree (and its state) was written.
+    // Nothing anywhere in the test dir besides the tree was written.
     const all = await walk(dir);
-    const outsideTree = all.filter((e) => !e.path.startsWith(r.root + '/') && e.path !== r.root)
-      .map((e) => relative(dir, e.path));
-    expect(outsideTree.every((p) => ['cache', 'cache/github', 'cache/github/acme', 'cache/github/acme/skills'].includes(p)
-      || p.startsWith('cache/state'))).toBe(true);
+    expect(all.filter((e) => !e.path.startsWith(root + '/') && e.path !== root)).toEqual([]);
     expect(existsSync('/abs/evil')).toBe(false);
     expect(existsSync(absTarget)).toBe(false);
 
     // Inside the tree: no symlinks or links. "up/through-symlink" lands as a plain dir + file inside the tree.
-    const inTree = all.filter((e) => e.path.startsWith(r.root + '/'));
+    const inTree = all.filter((e) => e.path.startsWith(root + '/'));
     expect(inTree.filter((e) => e.symlink)).toEqual([]);
-    expect(inTree.map((e) => relative(r.root, e.path)).sort()).toEqual(['ok.txt', 'up', 'up/through-symlink']);
-  });
-
-  it('a { symlink } file in the fake repo is never created in the tree', async () => {
-    const { ctx, cache } = await setup();
-    const r = ok(await materializeGithub(src(), opts(), cache, ctx));
-    expect(existsSync(join(r.root, 'evil-link'))).toBe(false);
-    expect((await walk(r.root)).filter((e) => e.symlink)).toEqual([]);
-  });
-
-  it('concurrent materialize of the same sha yields one complete tree', async () => {
-    const { ctx, cache, fake } = await setup();
-    const results = (await Promise.all([1, 2, 3, 4].map(() => materializeGithub(src(), opts(), cache, ctx)))).map(ok);
-    const roots = new Set(results.map((r) => r.root));
-    expect(roots.size).toBe(1);
-    const [root] = roots;
-    for (const f of REAL_FILES) expect(await readFile(join(root, f), 'utf8')).toBe(FILES[f]);
-    expect(await readdir(join(cache.dir, 'github', 'acme', 'skills'))).toEqual([SHA1]);
-    expect(tarballCalls(fake.calls)).toBeGreaterThanOrEqual(1);
-    const stateFiles = await readdir(join(cache.dir, 'state'), { recursive: true });
-    expect(stateFiles.filter((f) => String(f).includes('.tmp'))).toEqual([]);
+    expect(inTree.map((e) => relative(root, e.path)).sort()).toEqual(['ok.txt', 'up', 'up/through-symlink']);
   });
 
   it('works over real HTTP through fakeGithub.nodeHandler and fetchHttp', async () => {
-    const { ctx, cache, fake } = await setup();
-    const server = createServer(fake.nodeHandler);
+    const t = await setup();
+    const server = createServer(t.fake.nodeHandler);
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     try {
-      ctx.http = fetchHttp();
-      ctx.githubApi = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-      const r = ok(await materializeGithub(src(), opts(), cache, ctx));
-      expect(await readFile(join(r.root, 'skills/foo/SKILL.md'), 'utf8')).toBe(FILES['skills/foo/SKILL.md']);
-      fake.offline(true);
-      await expect(ctx.http.get(`${ctx.githubApi}/repos/acme/skills/commits/main`)).rejects.toBeInstanceOf(NetworkError);
+      t.ctx.http = fetchHttp();
+      t.ctx.githubApi = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      ok(await fetchTree(t));
+      expect(await readFile(join(into(t), 'skills/foo/SKILL.md'), 'utf8')).toBe(FILES['skills/foo/SKILL.md']);
+      t.fake.offline(true);
+      await expect(t.ctx.http.get(`${t.ctx.githubApi}/repos/acme/skills/commits/main`)).rejects.toBeInstanceOf(NetworkError);
     } finally {
       server.closeAllConnections();
       await new Promise((r) => server.close(r));
     }
   });
-});
 
-describe('readGithubFile', () => {
-  it('readGithubFile returns raw text at the resolved sha and caches it by sha', async () => {
-    const { ctx, cache, fake, spec } = await setup();
-    const f = { ...src(), path: 'skills/foo/SKILL.md' };
-    const a = ok(await readGithubFile(f, opts(), cache, ctx));
-    expect(a).toMatchObject({ sha: SHA1, text: FILES['skills/foo/SKILL.md'], stale: false });
-    expect(fake.calls.filter((c) => c.includes('/contents/'))).toEqual([`/repos/acme/skills/contents/skills/foo/SKILL.md?ref=${SHA1}`]);
-    expect(await readFile(join(cache.dir, 'files', 'acme', 'skills', SHA1, 'skills/foo/SKILL.md'), 'utf8'))
-      .toBe(FILES['skills/foo/SKILL.md']);
-
-    spec['acme/skills'].commits[SHA1]['skills/foo/SKILL.md'] = 'changed upstream (cannot happen for a sha, proves the cache is used)';
-    const b = ok(await readGithubFile(f, opts(), cache, ctx));
-    expect(b.text).toBe(FILES['skills/foo/SKILL.md']);
-    expect(fake.calls.filter((c) => c.includes('/contents/'))).toHaveLength(1);
-    expect(commitCalls(fake.calls)).toBe(1); // second call within ttl: no re-check
-  });
-
-  it('offline after a previous read returns the cached file as stale; a missing file is no-access', async () => {
-    const { ctx, cache, fake, advance } = await setup();
-    const f = { ...src(), path: 'README.md' };
-    ok(await readGithubFile(f, opts(), cache, ctx));
-    advance(TTL + 1);
-    fake.offline(true);
-    const r = ok(await readGithubFile(f, opts(), cache, ctx));
-    expect(r).toMatchObject({ sha: SHA1, text: FILES['README.md'], stale: true });
-    expect(r.problems.map((p) => p.code)).toEqual(['source/stale']);
-    fake.offline(false);
-    const e = err(await readGithubFile({ ...src(), path: 'nope.md' }, opts(), cache, ctx));
-    expect(e.code).toBe('source/no-access');
-    expect(e.message).toContain('acme/skills');
-  });
-
-  it('rejects .. and absolute paths without any request', async () => {
-    const { ctx, cache, fake } = await setup();
-    for (const path of ['../x', 'a/../../x', '/etc/passwd', 'a/./../..', '', 'a\0b']) {
-      const e = err(await readGithubFile({ ...src(), path }, opts(), cache, ctx));
-      expect(e.code).toBe('source/invalid');
-    }
-    expect(fake.calls).toEqual([]);
-  });
-});
-
-describe('review fixes (R8 stale on any failure, R9 lazy auth and extraction cap)', () => {
-  const rateLimited = () => res(403, '{"message":"API rate limit exceeded"}', { 'x-ratelimit-remaining': '0' });
-
-  it('a rate-limited re-check with a cached tree returns the tree as stale, with the rate-limit message', async () => {
-    let limited = false;
-    const { ctx, cache } = await setup({ http: (f) => stub(() => (limited ? rateLimited() : undefined), f) });
-    const first = ok(await materializeGithub(src(), opts(), cache, ctx));
-    limited = true;
-    const r = ok(await materializeGithub(src(), opts({ force: true }), cache, ctx));
-    expect(r).toMatchObject({ sha: SHA1, root: first.root, stale: true });
-    expect(r.problems).toHaveLength(1);
-    expect(r.problems[0]).toMatchObject({ level: 'warning', code: 'source/stale' });
-    expect(r.problems[0].message).toContain('rate limit');
-    expect(r.problems[0].message).toContain('acme/skills');
-  });
-
-  it('a 401 re-check with a cached tree returns the tree as stale and keeps the gh auth login hint', async () => {
-    let denied = false;
-    const exec: Exec = async () => ({ code: 0, stdout: 'tok\n', stderr: '' });
-    const { ctx, cache } = await setup({ exec, http: (f) => stub(() => (denied ? res(401, '{"message":"Bad credentials"}') : undefined), f) });
-    ok(await materializeGithub(src('main', { type: 'gh_cli' }), opts(), cache, ctx));
-    denied = true;
-    const r = ok(await materializeGithub(src('main', { type: 'gh_cli' }), opts({ force: true }), cache, ctx));
-    expect(r).toMatchObject({ sha: SHA1, stale: true });
-    expect(r.problems.map((p) => p.code)).toEqual(['source/stale']);
-    expect(r.problems[0].message).toContain('gh auth login');
-  });
-
-  it('ref-not-found on re-check with a cached tree is stale; without one it is still the original error', async () => {
-    const { ctx, cache, spec } = await setup();
-    ok(await materializeGithub(src(), opts(), cache, ctx));
-    delete spec['acme/skills'].refs.main;
-    const r = ok(await materializeGithub(src(), opts({ force: true }), cache, ctx));
-    expect(r.stale).toBe(true);
-    expect(r.problems[0].message).toContain('was not found');
-    const fresh = await setup();
-    delete fresh.spec['acme/skills'].refs.main;
-    expect(err(await materializeGithub(src(), opts(), fresh.cache, fresh.ctx)).code).toBe('source/ref-not-found');
-  });
-
-  it('a failed download of a newly resolved sha falls back to the previous tree as stale', async () => {
-    const { ctx, cache, spec } = await setup({
-      http: (f) => stub((url) => (url.includes(`/tarball/${SHA2}`) ? res(404, 'Not Found') : undefined), f),
-    });
-    ok(await materializeGithub(src(), opts(), cache, ctx));
-    spec['acme/skills'].refs.main = SHA2;
-    const r = ok(await materializeGithub(src(), opts({ force: true }), cache, ctx));
-    expect(r).toMatchObject({ sha: SHA1, stale: true });
-    expect(r.problems.map((p) => p.code)).toEqual(['source/stale']);
-    expect(r.problems[0].message).toContain(SHA2.slice(0, 7));
-  });
-
-  it('readGithubFile: a 401 or rate-limited re-check with a cached file returns it as stale', async () => {
-    let mode: 'ok' | 'denied' | 'limited' = 'ok';
-    const { ctx, cache } = await setup({
-      http: (f) => stub(() => (mode === 'denied' ? res(401, '') : mode === 'limited' ? rateLimited() : undefined), f),
-    });
-    const f = { ...src('main', { type: 'gh_cli' } as Auth), path: 'README.md' };
-    ok(await readGithubFile(f, opts(), cache, ctx));
-    for (const m of ['denied', 'limited'] as const) {
-      mode = m;
-      const r = ok(await readGithubFile(f, opts({ force: true }), cache, ctx));
-      expect(r).toMatchObject({ sha: SHA1, text: FILES['README.md'], stale: true });
-      expect(r.problems.filter((p) => p.code === 'source/stale')).toHaveLength(1);
-    }
-  });
-
-  it('auth is resolved lazily: cache hits and an offline sha-pinned tree never spawn gh or report auth problems', async () => {
+  it('auth is resolved lazily: a sha ref equal to knownSha makes no request and never spawns gh', async () => {
     let spawned = 0;
     const exec: Exec = async () => { spawned++; return { code: 1, stdout: '', stderr: 'not logged in' }; };
-    const { ctx, cache, fake } = await setup({ exec });
+    const t = await setup({ exec });
     const gh = { type: 'gh_cli' } as Auth;
-    const first = ok(await materializeGithub(src('main', gh), opts(), cache, ctx));
+    const r = ok(await fetchGithubTree(src(SHA1, gh), { trusted: true, knownSha: SHA1 }, into(t), t.ctx));
+    expect(r).toMatchObject({ sha: SHA1, unchanged: true, problems: [] });
+    expect(t.fake.calls).toEqual([]);
+    expect(spawned).toBe(0);
+    const first = ok(await fetchTree(t, 'main', gh));
     expect(spawned).toBe(1);
     expect(first.problems.map((p) => p.code)).toEqual(['auth/gh-unavailable']);
-
-    resetGhTokenCache();
-    const hit = ok(await materializeGithub(src('main', gh), opts(), cache, ctx)); // fresh ref state + tree on disk
-    expect(hit.problems).toEqual([]);
-    fake.offline(true);
-    const pinned = ok(await materializeGithub(src(SHA1, gh), opts(), cache, ctx));
-    expect(pinned.problems).toEqual([]);
-    const file = await readGithubFile({ ...src(SHA1, gh), path: 'README.md' }, opts(), cache, ctx);
-    expect(err(file).code).toBe('source/unreachable'); // not cached: a request was needed
-    fake.offline(false);
-    ok(await readGithubFile({ ...src(SHA1, gh), path: 'README.md' }, opts(), cache, ctx));
-    resetGhTokenCache();
-    const fileHit = ok(await readGithubFile({ ...src(SHA1, gh), path: 'README.md' }, opts(), cache, ctx));
-    expect(fileHit.problems).toEqual([]);
-    // first materialize, then the offline file read (gh's answer is then cached for the online read)
-    expect(spawned).toBe(2);
   });
 
   it('extractTarball aborts once the declared entry sizes pass the cap', async () => {
@@ -476,27 +231,12 @@ describe('review fixes (R8 stale on any failure, R9 lazy auth and extraction cap
     await expect(extractTarball(tgz, await tmpDir(), 16)).resolves.toBeUndefined();
   });
 
-  it('a tarball expanding past 500 MB gives source/too-large and leaves no temp dir', async () => {
-    const top = `acme-skills-${SHA1.slice(0, 7)}`;
-    const huge = buildTarGz([
-      { path: `${top}/`, type: 'Directory' },
-      { path: `${top}/small`, type: 'File', body: 'x' },
-      { path: `${top}/huge`, type: 'File', size: 500 * 1024 * 1024 },
-    ]);
-    const { ctx, cache } = await setup({
-      http: (f) => stub((url) => (url.includes('/tarball/') ? { status: 200, headers: {}, body: huge } : undefined), f),
-    });
-    const e = err(await materializeGithub(src(), opts(), cache, ctx));
-    expect(e.code).toBe('source/too-large');
-    expect(e.message).toContain('acme/skills');
-    expect(await readdir(join(cache.dir, 'github', 'acme', 'skills'))).toEqual([]);
-  });
 });
 
 describe('auth cause on errors', () => {
-  it('names the unset env var when a no-cache 404 follows an auth problem (GitHub answers 404 for a private repo without access)', async () => {
+  it('names the unset env var when a 404 follows an auth problem (GitHub answers 404 for a private repo without access)', async () => {
     const t = await setup({ token: 'secret' });
-    const r = await materializeGithub(src('main', { type: 'bearer', env_var: 'BEARER_X' }), opts(), t.cache, t.ctx);
+    const r = await fetchGithubTree(src('main', { type: 'bearer', env_var: 'BEARER_X' }), { trusted: true }, join(t.dir, 'out'), t.ctx);
     expect('error' in r && r.error.code).toBe('source/no-access');
     expect('error' in r && r.error.message).toContain('BEARER_X');
   });
@@ -624,14 +364,18 @@ describe('fetchGithubFile', () => {
     expect(commitCalls(t.fake.calls)).toBe(0);
   });
 
-  it('rejects an escaping path without any request', async () => {
+  it('rejects .. and absolute paths without any request', async () => {
     const t = await setup();
-    expect(err(await fetchGithubFile({ ...src(), path: '../x' }, { trusted: true }, t.ctx)).code).toBe('source/invalid');
+    for (const path of ['../x', 'a/../../x', '/etc/passwd', 'a/./../..', '', 'a\0b']) {
+      expect(err(await fetchGithubFile({ ...src(), path }, { trusted: true }, t.ctx)).code).toBe('source/invalid');
+    }
     expect(t.fake.calls).toEqual([]);
   });
 
-  it('a missing file is source/no-access', async () => {
+  it('a missing file is source/no-access naming owner/repo', async () => {
     const t = await setup();
-    expect(err(await fetchGithubFile({ ...src(), path: 'nope.md' }, { trusted: true }, t.ctx)).code).toBe('source/no-access');
+    const e = err(await fetchGithubFile({ ...src(), path: 'nope.md' }, { trusted: true }, t.ctx));
+    expect(e.code).toBe('source/no-access');
+    expect(e.message).toContain('acme/skills');
   });
 });

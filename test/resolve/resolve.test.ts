@@ -26,7 +26,7 @@ const repoWith = (registries: Entries, extra: Record<string, unknown> = {}) =>
 
 async function setup(o: {
   local: Entries; repos?: FakeSpec; routes?: Record<string, FakeRoute>;
-  env?: Record<string, string | undefined>; cache?: { enabled: boolean; ttlSeconds: number };
+  env?: Record<string, string | undefined>;
   wrap?: (http: Http) => Http;
 }) {
   const dir = await tmpDir();
@@ -40,8 +40,7 @@ async function setup(o: {
   const path = join(dir, 'config.jsonc');
   const parsed = parseRegistriesFile(file(o.local), { file: path, isLocalConfig: true });
   const config: Config = {
-    path, exists: true, ...parsed,
-    cache: { ...(o.cache ?? { enabled: true, ttlSeconds: 3600 }), dir: join(dir, 'cache') }, libraryDir: join(dir, 'library'),
+    path, exists: true, ...parsed, libraryDir: join(dir, 'library'),
   };
   return { config, ctx, github, web };
 }

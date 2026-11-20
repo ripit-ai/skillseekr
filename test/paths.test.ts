@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { configPath, defaultCacheDir, expandHome, libraryDir } from '../src/paths.js';
+import { configPath, expandHome, libraryDir } from '../src/paths.js';
 import type { Ctx } from '../src/context.js';
 
 const mk = (env: Record<string, string | undefined>): Ctx =>
@@ -17,11 +17,7 @@ describe('configPath', () => {
   });
 });
 
-describe('defaultCacheDir / expandHome', () => {
-  it('honours XDG_CACHE_HOME, else ~/.cache', () => {
-    expect(defaultCacheDir(mk({ XDG_CACHE_HOME: '/xc' }))).toBe('/xc/skillseekr');
-    expect(defaultCacheDir(mk({}))).toBe('/home/u/.cache/skillseekr');
-  });
+describe('expandHome', () => {
   it('expands ~ only at the start', () => {
     expect(expandHome('~', '/h')).toBe('/h');
     expect(expandHome('~/x', '/h')).toBe('/h/x');

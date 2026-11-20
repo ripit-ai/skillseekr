@@ -71,7 +71,7 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
       return ok({ results, stale: c.stale, problems: errorsOf(c.problems) });
     });
 
-  tool('get_skill', 'Fetch a skill by id or unique name. Returns the SKILL.md body, its files and its cached folder. Follow it. Does not install anything.',
+  tool('get_skill', 'Fetch a skill by id or unique name. Returns the SKILL.md body, its files and its folder in the skill library. Follow it. Does not install anything.',
     { skill: z.string() },
     async ({ skill }) => {
       const c = await engine.catalog();
@@ -80,7 +80,7 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
       const s = r.skill;
       const f = await c.readFile(s, 'SKILL.md');
       if (f.kind === 'refused') return fail({ error: 'refused', reason: f.reason });
-      if (f.kind === 'missing') return fail({ error: 'not-found', message: `SKILL.md of "${s.id}" is missing from the cache; run "skillseekr sync"` });
+      if (f.kind === 'missing') return fail({ error: 'not-found', message: `SKILL.md of "${s.id}" is missing from the skill library; run 'skillseekr update'` });
       return ok({
         id: s.id, name: s.name, description: s.description, registry: s.registry, via: s.via,
         // Over 1 MB (or binary): metadata only, like read_skill_file.
@@ -134,7 +134,7 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
       });
     });
 
-  tool('list_registries', 'List the resolved registries in order, with include chain, resolved SHA, cache age and overrides.',
+  tool('list_registries', 'List the resolved registries in order, with include chain, resolved SHA, last fetch time and overrides.',
     {},
     async () => {
       const r = await engine.registries();

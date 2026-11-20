@@ -6,11 +6,12 @@ import { createEngine } from '../src/engine.js';
 import { doctor } from '../src/doctor.js';
 import { fakeGithub } from './helpers/fakeGithub.js';
 import { tmpDir } from './helpers/tmp.js';
+import { pull } from './helpers/library.js';
 
 const SHA = 'd'.repeat(40);
 const skill = (name: string) => `---\nname: ${name}\ndescription: ${name} things\n---\nbody\n`;
 
-async function env(config: string | undefined) {
+async function env(config: string | undefined | ((home: string) => string)) {
   const home = await tmpDir();
   const github = fakeGithub({
     'o/one': { refs: { main: SHA }, commits: { [SHA]: { 'skills/alpha/SKILL.md': skill('alpha') } } },
@@ -30,7 +31,7 @@ async function env(config: string | undefined) {
     },
   });
   const file = join(home, 'config.jsonc');
-  if (config !== undefined) await writeFile(file, config);
+  if (config !== undefined) await writeFile(file, typeof config === 'function' ? config(home) : config);
   const ctx: Ctx = {
     env: { SKILLSEEKR_CONFIG: file }, home, cwd: home, http: github.http,
     exec: async () => ({ code: 1, stdout: '', stderr: '' }), now: () => 1_700_000_000_000, githubApi: 'https://api.github.com',
@@ -40,8 +41,8 @@ async function env(config: string | undefined) {
 
 describe('doctor', () => {
   it('doctor reports config parse, each registry\'s access (fail names the registry), include loops, overrides (warn), unauthenticated GitHub sources (warn: rate limits), MCP registration per detected tool, and skill folder paths', async () => {
-    const e = await env(JSON.stringify({
-      cache: { dir: '~/cache' },
+    const e = await env((home) => JSON.stringify({
+      library: { dir: join(home, 'library') },
       registries: {
         one: { type: 'github', owner: 'o', repo: 'one', skills_dir: 'skills', ref: 'main' },
         bad: { type: 'github', owner: 'o', repo: 'missing', skills_dir: 'skills', ref: 'main', auth: { type: 'gh_cli' } },
@@ -49,6 +50,7 @@ describe('doctor', () => {
         three: { type: 'github', owner: 'o', repo: 'one', skills_dir: 'skills', ref: 'main', auth: { type: 'gh_cli' } },
       },
     }));
+    await pull(e.ctx);
     await mkdir(join(e.home, '.copilot', 'skills'), { recursive: true });
     await mkdir(join(e.home, '.config', 'opencode'), { recursive: true });
     await writeFile(join(e.home, '.config', 'opencode', 'opencode.json'),

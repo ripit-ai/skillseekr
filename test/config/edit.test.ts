@@ -27,11 +27,14 @@ describe('addRegistry', () => {
   });
 
   it('appends last when registries ends with a trailing comment', () => {
-    const text = defaultConfigText({ owner: 'ripit-ai', repo: 'agent-skills', name: 'ripit-ai' });
+    // A section after "registries" must survive the edit.
+    const text = defaultConfigText({ owner: 'ripit-ai', repo: 'agent-skills', name: 'ripit-ai' })
+      .replace(/\n}\n$/, ',\n  "library": { "dir": "~/lib" }\n}\n');
+    expect(text).toContain('"library"');
     const out = addRegistry(text, 'mine', http('mine'));
     expect(out).toContain('// Personal additions go below');
     expect(names(out)).toEqual(['ripit-ai', 'mine']);
-    expect(out).toContain('"cache"');
+    expect(out).toContain('"library": { "dir": "~/lib" }');
   });
 
   it('creates registries when missing', () => {
@@ -70,9 +73,8 @@ describe('defaultConfigText', () => {
       path: 'registries.jsonc', policy: true, auth: { type: 'gh_cli' }, description: 'ripit-ai shared skills',
     });
     expect(text).toContain('// Personal additions go below');
-    expect(text).toContain('"enabled": true');
-    expect(text).toContain('"ttl_seconds": 3600');
-    expect(text).toContain('"dir": "~/.cache/skillseekr"');
+    // The cache section is gone: it would only produce a config/cache-ignored warning.
+    expect(text).not.toContain('"cache"');
   });
 
   it('uses owner/repo as description for other names', () => {

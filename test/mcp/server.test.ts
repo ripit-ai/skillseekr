@@ -11,6 +11,7 @@ import type { Ctx } from '../../src/context.js';
 import type { Http } from '../../src/net/http.js';
 import { fakeGithub, type FakeSpec } from '../helpers/fakeGithub.js';
 import { tmpDir } from '../helpers/tmp.js';
+import { pull } from '../helpers/library.js';
 
 const API = 'https://api.github.com';
 const SHA = 'a'.repeat(40);
@@ -27,11 +28,12 @@ async function setup(opts: { repos?: FakeSpec; registries?: Record<string, unkno
   const path = join(dir, 'config.jsonc');
   const project = join(dir, 'project');
   await mkdir(project);
-  if (opts.registries) await writeFile(path, JSON.stringify({ cache: { dir: join(dir, 'cache') }, registries: opts.registries }));
+  if (opts.registries) await writeFile(path, JSON.stringify({ library: { dir: join(dir, 'library') }, registries: opts.registries }));
   const ctx: Ctx = {
     env: { SKILLSEEKR_CONFIG: path }, home: join(dir, 'home'), cwd: join(dir, 'cwd'), http,
     exec: async () => ({ code: 1, stdout: '', stderr: '' }), now: () => 1_700_000_000_000, githubApi: API,
   };
+  if (opts.registries) await pull(ctx);
   const server = createMcpServer(opts.engine ?? createEngine(ctx), ctx, { rootsTimeoutMs: 100 });
   const withRoots = opts.roots !== 'none';
   const client = new Client({ name: 't', version: '0' }, { capabilities: withRoots ? { roots: {} } : {} });

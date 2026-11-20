@@ -59,6 +59,16 @@ describe('installSkill', () => {
     expect((await contentHash(dir)).hash).toBe(skill.contentHash);
     expect((await readdir(join(proj, '.claude/skills'))).filter((n) => n.startsWith('.tmp-'))).toEqual([]);
   });
+  it("the marker's contentHash is computed from the copied files, not taken from the catalog record", async () => {
+    const { proj, src, ctx } = await setup();
+    const skill = { ...(await mkSkill(src, 'a')), contentHash: 'sha256:stale-record' };
+    await installSkill(skill, 'project', ctx);
+    const dir = join(proj, '.claude/skills/a');
+    const m = JSON.parse(await readFile(join(dir, '.skillseekr.json'), 'utf8'));
+    expect(m.contentHash).toBe((await contentHash(dir)).hash);
+    expect(m.contentHash).not.toBe('sha256:stale-record');
+    expect((await listInstalled(ctx, { scope: 'project' }))[0]!.modified).toBe(false);
+  });
   it('honours opts.projectDir', async () => {
     const { src, ctx } = await setup();
     const other = await tmpDir();

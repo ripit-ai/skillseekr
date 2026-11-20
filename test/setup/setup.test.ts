@@ -3,6 +3,9 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import type { Ctx, Exec, ExecResult } from '../../src/context.js';
 import { setup } from '../../src/setup/setup.js';
+import { doctor } from '../../src/doctor.js';
+import { createEngine } from '../../src/engine.js';
+import { pull } from '../helpers/library.js';
 import { claudeRegistrar } from '../../src/setup/registrars/claude.js';
 import { readJsonValue } from '../../src/setup/jsonMerge.js';
 import { opencodeRegistrar } from '../../src/setup/registrars/opencode.js';
@@ -236,8 +239,11 @@ describe('setup', () => {
 
   it('setup reports an unreadable registry by name through doctor (AC-2)', async () => {
     const e = await env();
-    const r = await setup(e.ctx, { yes: true, registry: 'acme/private' });
-    const fail = r.doctor.checks.find((c) => c.status === 'fail');
+    await setup(e.ctx, { yes: true, registry: 'acme/private' });
+    // Reads are offline: the failure shows once the library has been updated from the new config.
+    await pull(e.ctx);
+    const { checks } = await doctor(createEngine(e.ctx), e.ctx);
+    const fail = checks.find((c) => c.status === 'fail');
     expect(fail?.id).toBe('registry:acme');
     expect(fail?.message).toContain('acme');
   });

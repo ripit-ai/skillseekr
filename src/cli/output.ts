@@ -64,8 +64,8 @@ export async function blockingError(cli: Cli, problems: Problem[], skillTotal: n
 }
 
 /** Loads the catalog, reports problems, and throws exit 2 if nothing usable could be loaded. */
-export async function loadCatalog(cli: Cli, opts: { force?: boolean } = {}): Promise<Catalog> {
-  const catalog = await cli.engine().catalog(opts);
+export async function loadCatalog(cli: Cli): Promise<Catalog> {
+  const catalog = await cli.engine().catalog();
   reportProblems(cli.io, catalog.problems, catalog.stale);
   const blocked = await blockingError(cli, catalog.problems, catalog.skills.length);
   if (blocked) throw blocked;

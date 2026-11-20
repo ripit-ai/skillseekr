@@ -14,11 +14,6 @@ export function configPath(ctx: Ctx): string {
   return join(base, 'skillseekr', 'config.jsonc');
 }
 
-export function defaultCacheDir(ctx: Ctx): string {
-  const base = ctx.env.XDG_CACHE_HOME || join(ctx.home, '.cache');
-  return join(base, 'skillseekr');
-}
-
 /** Library root: $SKILLSEEKR_LIBRARY, then the configured dir (`~` expanded), then ~/.skillseekr/library. */
 export function libraryDir(ctx: Ctx, configured?: string): string {
   if (ctx.env.SKILLSEEKR_LIBRARY) return expandHome(ctx.env.SKILLSEEKR_LIBRARY, ctx.home);
