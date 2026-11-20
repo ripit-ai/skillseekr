@@ -6,6 +6,7 @@ import { main } from '../../src/cli/main.js';
 import type { Ctx } from '../../src/context.js';
 import { fakeGithub, type FakeSpec } from '../helpers/fakeGithub.js';
 import { tmpDir } from '../helpers/tmp.js';
+import { pull } from '../helpers/library.js';
 
 const API = 'https://api.github.com';
 const SHA = 'a'.repeat(40);
@@ -17,12 +18,15 @@ const repos = (): FakeSpec => ({
   'o/two': { refs: { main: SHA }, commits: { [SHA]: { 'skills/other/dup/SKILL.md': skill('dup'), 'skills/alpha/SKILL.md': skill('alpha', 'TWO') } } },
 });
 
+/** Writes the config (registries, or raw text) and, for registries, pulls the library. */
 async function setup(o: { registries?: Record<string, unknown>; repos?: FakeSpec; raw?: string } = {}) {
   const dir = await tmpDir();
   const github = fakeGithub(o.repos ?? repos());
   const path = join(dir, 'config.jsonc');
+  const lib = join(dir, 'library');
+  const config = (registries: Record<string, unknown>) => JSON.stringify({ library: { dir: lib }, registries });
   if (o.raw !== undefined) await writeFile(path, o.raw);
-  else if (o.registries) await writeFile(path, JSON.stringify({ cache: { dir: join(dir, 'cache') }, registries: o.registries }));
+  else if (o.registries) await writeFile(path, config(o.registries));
   const cwd = join(dir, 'project');
   await mkdir(cwd);
   await mkdir(join(dir, 'home'));
@@ -36,7 +40,8 @@ async function setup(o: { registries?: Record<string, unknown>; repos?: FakeSpec
     const code = await main(argv, { ctx, io: { out: (s) => out.push(s), err: (s) => err.push(s) } });
     return { code, out: out.join(''), err: err.join('') };
   };
-  return { run, ctx, github, dir, cwd, path };
+  if (o.registries) await pull(ctx);
+  return { run, ctx, github, dir, cwd, path, lib, config };
 }
 
 describe('cli', () => {
@@ -166,7 +171,7 @@ describe('cli', () => {
     expect(await readFile(join(s.cwd, '.claude', 'skills', 'dup', 'SKILL.md'), 'utf8')).toContain('dup helps');
     const j = await s.run('--json', 'update', '--force');
     expect(j.code).toBe(1);
-    expect(JSON.parse(j.out).results.find((x: { name: string }) => x.name === 'alpha')).toMatchObject({ result: 'failed', message: 'disk on fire' });
+    expect(JSON.parse(j.out).installs.find((x: { name: string }) => x.name === 'alpha')).toMatchObject({ result: 'failed', message: 'disk on fire' });
   });
 
   it('update skips modified without --force', async () => {
@@ -183,9 +188,10 @@ describe('cli', () => {
   });
 
   it('registries prints the resolved list with via; add/remove edit the config keeping comments', async () => {
-    const raw = `{\n  // keep me\n  "cache": { "dir": "CACHE" },\n  "registries": {\n    "one": { "type": "github", "owner": "o", "repo": "one", "skills_dir": "skills", "ref": "main" }\n  }\n}\n`;
+    const raw = `{\n  // keep me\n  "library": { "dir": "LIB" },\n  "registries": {\n    "one": { "type": "github", "owner": "o", "repo": "one", "skills_dir": "skills", "ref": "main" }\n  }\n}\n`;
     const s = await setup({ raw });
-    await writeFile(s.path, raw.replace('CACHE', join(s.dir, 'cache')));
+    await writeFile(s.path, raw.replace('LIB', s.lib));
+    await pull(s.ctx);
     const list = await s.run('registries');
     expect(list.code).toBe(0);
     expect(list.out).toMatch(/^one\s+github\s+one\s+2\s+main\s+aaaaaaa/m);
@@ -196,6 +202,11 @@ describe('cli', () => {
     expect(text).toContain('// keep me');
     expect(text).toContain('"mine"');
     expect(text).toContain('"gh_cli"');
+    // The edit reaches reads only after an update (Review Focus 1).
+    const before = JSON.parse((await s.run('--json', 'registries')).out);
+    expect(before.registries.map((r: { name: string }) => r.name)).toEqual(['one']);
+    expect(before.problems.map((p: { code: string }) => p.code)).toEqual(['library/config-changed']);
+    await pull(s.ctx);
     const j = JSON.parse((await s.run('--json', 'registries')).out);
     expect(j.registries.map((r: { name: string }) => r.name)).toEqual(['one', 'mine']);
 
@@ -240,22 +251,15 @@ describe('cli', () => {
     expect(JSON.parse(await readFile(s.path, 'utf8')).registries.one).toMatchObject({ type: 'http', skill_name: 'x' });
   });
 
-  it('sync forces a reload', async () => {
-    const s = await setup({ registries: { one: gh('one') } });
-    await s.run('search', 'alpha');
-    const before = s.github.calls.filter((c) => c.includes('/commits/')).length;
-    const r = await s.run('sync');
-    expect(r.code).toBe(0);
-    expect(r.out).toBe('synced 1 registries, 2 skills, 0 problems\n');
-    expect(s.github.calls.filter((c) => c.includes('/commits/')).length).toBeGreaterThan(before);
-  });
-
   it('stale catalog prints a one-line warning to stderr', async () => {
     const s = await setup({ registries: { one: gh('one') } });
-    await s.run('sync');
     s.github.offline(true);
-    const r = await s.run('sync');
+    await pull(s.ctx); // fails for "one", which keeps its previous copy
+    const calls = s.github.calls.length;
+    const r = await s.run('search', 'alpha');
     expect(r.code).toBe(0);
+    expect(r.out).toMatch(/^alpha\s+one/m);
+    expect(s.github.calls).toHaveLength(calls);
     expect(r.err.trim().split('\n')).toEqual(["warning: catalog may be stale (offline or failing sources); run 'skillseekr doctor'"]);
     const j = await s.run('--json', 'search', 'alpha');
     expect(() => JSON.parse(j.out)).not.toThrow();
@@ -276,7 +280,8 @@ describe('cli', () => {
   it('--config sets SKILLSEEKR_CONFIG on the ctx without touching process.env', async () => {
     const s = await setup();
     const other = join(s.dir, 'other.jsonc');
-    await writeFile(other, JSON.stringify({ cache: { dir: join(s.dir, 'cache') }, registries: { one: gh('one') } }));
+    await writeFile(other, s.config({ one: gh('one') }));
+    await pull({ ...s.ctx, env: { ...s.ctx.env, SKILLSEEKR_CONFIG: other } });
     const before = process.env.SKILLSEEKR_CONFIG;
     const r = await s.run('--config', other, 'search', 'alpha');
     expect(r.code).toBe(0);
@@ -307,12 +312,78 @@ describe('cli', () => {
     const s = await setup({ registries: { one: gh('one') } });
     expect((await s.run('update', 'ghost')).code).toBe(1);
     await s.run('install', 'cat/dup');
-    const path = join(s.dir, 'config.jsonc');
-    await writeFile(path, JSON.stringify({ cache: { dir: join(s.dir, 'cache') }, registries: { two: gh('two') } }));
+    await writeFile(s.path, s.config({ two: gh('two') }));
+    await pull(s.ctx);
     const r = await s.run('update', 'dup');
     expect(r.code).toBe(0);
     expect(r.out).toMatch(/dup\s+missing-from-catalog/);
     expect(r.err).toContain('hint:');
+  });
+
+  it('update on an empty library pulls it and lists the changes; search before it exits 2', async () => {
+    const s = await setup();
+    await writeFile(s.path, s.config({ r: gh('one') }));
+    const before = await s.run('search', 'alpha');
+    expect(before.code).toBe(2);
+    expect(before.err).toContain("the skill library is empty; run 'skillseekr update'");
+    const r = await s.run('update');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('updated 1 registries: 2 skills added, 0 changed, 0 removed');
+    expect(r.out).toContain('  + alpha (r)');
+    // The memoized engine sees the new manifest.
+    expect((await s.run('search', 'alpha')).code).toBe(0);
+  });
+
+  it('update --json prints an UpdateReport', async () => {
+    const s = await setup();
+    await writeFile(s.path, s.config({ r: gh('one') }));
+    const r = await s.run('--json', 'update');
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ aborted: false, registries: 1, skills: 2, installs: [], problems: [], stale: false });
+  });
+
+  it('update exits 1 naming the path when the library cannot be written', async () => {
+    if (process.getuid?.() === 0) return;
+    const s = await setup();
+    await writeFile(s.path, s.config({ r: gh('one') }));
+    const parent = join(s.dir, 'ro');
+    await mkdir(parent);
+    const lib = join(parent, 'library');
+    await writeFile(s.path, JSON.stringify({ library: { dir: lib }, registries: { r: gh('one') } }));
+    await chmod(parent, 0o500);
+    try {
+      const r = await s.run('update');
+      expect(r.code).toBe(1);
+      expect(r.err).toContain(lib);
+    } finally { await chmod(parent, 0o700); }
+  });
+
+  it('update --user is a usage error; --no-installs leaves installs alone', async () => {
+    const s = await setup({ registries: { one: gh('one') } });
+    expect((await s.run('update', '--user')).code).toBe(1);
+    await s.run('install', 'alpha');
+    const file = join(s.cwd, '.claude', 'skills', 'alpha', 'SKILL.md');
+    await writeFile(file, 'local edit');
+    const r = await s.run('update', '--no-installs', '--force');
+    expect(r.code).toBe(0);
+    expect(await readFile(file, 'utf8')).toBe('local edit');
+  });
+
+  it('registries add and remove print the update hint', async () => {
+    const s = await setup();
+    const add = await s.run('registries', 'add', 'x', '--type', 'http-registry', '--url', 'https://x');
+    expect(add.out).toContain("run 'skillseekr update' to apply");
+    const rm = await s.run('registries', 'remove', 'x');
+    expect(rm.out).toContain("run 'skillseekr update' to apply");
+  });
+
+  it('read commands against a pulled library never touch the network', async () => {
+    const s = await setup({ registries: { one: gh('one') } });
+    s.ctx.http = { get: async () => { throw new Error('network used'); } };
+    for (const argv of [['search', 'alpha'], ['show', 'alpha'], ['install', 'alpha'], ['list'], ['outdated'], ['registries'], ['doctor']]) {
+      const r = await s.run(...argv);
+      expect(r.code, `${argv.join(' ')}: ${r.err}`).toBe(0);
+    }
   });
 
   it('registries add/remove follow a symlinked config and keep its mode', async () => {
@@ -386,7 +457,7 @@ describe('cli', () => {
     const s = await setup();
     await mkdir(join(s.ctx.home, '.copilot'));
     s.ctx.env.SKILLSEEKR_CONFIG = join(s.dir, 'new-config.jsonc');
-    const answers = ['n', ''];
+    const answers = ['n', '', ''];
     const asked: string[] = [];
     const out: string[] = []; const err: string[] = [];
     const io = { out: (x: string) => out.push(x), err: (x: string) => err.push(x), prompt: async (q: string) => { asked.push(q); return answers.shift()!; } };
@@ -395,12 +466,64 @@ describe('cli', () => {
     expect(out.join('')).toContain('mcp-config.json');
     out.length = 0;
     await main(['setup', '--tools', 'copilot'], { ctx: s.ctx, io });
-    expect(asked).toHaveLength(2);
+    expect(asked).toHaveLength(3);
+    expect(asked[2]).toBe('Update the skill library now? [y/N] ');
+    expect(out.join('')).toContain("skipped; run 'skillseekr update' when you're ready");
     expect(JSON.parse(await readFile(join(s.ctx.home, '.copilot', 'mcp-config.json'), 'utf8')).mcpServers.skillseekr.command).toBe('skillseekr');
     expect(out.join('')).toMatch(/doctor/i);
     const bad = await s.run('setup', '--tools', 'emacs', '--yes');
     expect(bad.code).toBe(1);
     expect(bad.err).toContain('emacs');
+  });
+
+  it('setup runs and summarizes the update after a yes answer', async () => {
+    const s = await setup();
+    await mkdir(join(s.ctx.home, '.copilot'));
+    s.ctx.env.SKILLSEEKR_CONFIG = join(s.dir, 'upd-config.jsonc');
+    const out: string[] = [];
+    const io = { out: (x: string) => out.push(x), err: () => {}, prompt: async (q: string) => (q.startsWith('Update') ? 'y' : '') };
+    await main(['setup', '--tools', 'copilot'], { ctx: s.ctx, io });
+    expect(out.join('')).toMatch(/updated \d+ registries: \d+ skills added, \d+ changed, \d+ removed/);
+    const noPrompt = await s.run('setup', '--tools', 'copilot');
+    expect(noPrompt.code).toBe(1);
+  });
+
+  it('setup prompt: only y/yes (any case, trimmed) runs the update; the real prompt is used', async () => {
+    for (const [answer, runs] of [['Y', true], ['yes', true], [' YES ', true], ['y', true], ['n', false], ['whatever', false], ['', false]] as const) {
+      const s = await setup();
+      await mkdir(join(s.ctx.home, '.copilot'));
+      s.ctx.env.SKILLSEEKR_CONFIG = join(s.dir, 'p-config.jsonc');
+      const io = { out: () => {}, err: () => {}, prompt: async (q: string) => (q.startsWith('Update') ? answer : '') };
+      await main(['setup', '--tools', 'copilot'], { ctx: s.ctx, io });
+      const manifest = await stat(join(s.ctx.home, '.skillseekr', 'library', 'manifest.json')).then(() => true, () => false);
+      expect(manifest, `answer ${JSON.stringify(answer)}`).toBe(runs);
+    }
+  });
+
+  it('setup shows install results of its update: table, modified hint, missing-from-catalog hint, failures', async () => {
+    const s = await setup({ registries: { one: gh('one') } });
+    await s.run('install', 'alpha');
+    await writeFile(join(s.cwd, '.claude', 'skills', 'alpha', 'SKILL.md'), 'local edit');
+    await mkdir(join(s.ctx.home, '.copilot'));
+    const r = await s.run('setup', '--tools', 'copilot', '--yes');
+    expect(r.out).toMatch(/alpha\s+skipped-modified/);
+    expect(r.out).toContain('modified installs were skipped; use --force to overwrite them');
+    // Remove the registry from the config, then the installed skill is no longer in the catalog.
+    await writeFile(s.path, JSON.stringify({ library: { dir: s.lib }, registries: { two: gh('two') } }));
+    const m = await s.run('setup', '--tools', 'copilot', '--yes');
+    expect(m.err).toContain('no longer in the catalog');
+  });
+
+  it('setup exits 1 when its confirmed update is aborted (held lock)', async () => {
+    const s = await setup();
+    await mkdir(join(s.ctx.home, '.copilot'));
+    s.ctx.env.SKILLSEEKR_CONFIG = join(s.dir, 'lock-config.jsonc');
+    const lib = join(s.ctx.home, '.skillseekr', 'library');
+    await mkdir(lib, { recursive: true });
+    await writeFile(join(lib, '.lock'), JSON.stringify({ pid: process.pid, at: '2023-01-01T00:00:00.000Z' }));
+    const r = await s.run('setup', '--tools', 'copilot', '--yes');
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('library update:');
   });
 
   it('setup --json without --yes keeps stdout pure JSON; the preview goes to stderr', async () => {

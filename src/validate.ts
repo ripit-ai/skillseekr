@@ -3,8 +3,8 @@ import { basename, extname, join } from 'node:path';
 import { parseFrontmatter } from './catalog/frontmatter.js';
 import { parseRegistriesFile } from './config/load.js';
 import type { Ctx } from './context.js';
-import { defaultCacheDir } from './paths.js';
-import { resolve } from './resolve/resolve.js';
+import { libraryDir } from './paths.js';
+import { onlineIncludeLoader, resolve } from './resolve/resolve.js';
 import type { Config, Problem, RegistryEntry } from './types.js';
 
 const err = (code: string, message: string, file?: string): Problem => ({ level: 'error', code, message, ...(file ? { file } : {}) });
@@ -59,11 +59,10 @@ async function validateRegistriesFile(file: string, ctx: Ctx): Promise<Problem[]
   if (problems.some((p) => p.code === 'config/parse-error')) return problems;
 
   const config: Config = {
-    path: file, exists: true, registries: kept, problems: [],
-    cache: { enabled: true, ttlSeconds: 3600, dir: defaultCacheDir(ctx) },
+    path: file, exists: true, registries: kept, problems: [], libraryDir: libraryDir(ctx),
   };
   // An empty env as a second guard: nothing resolved here may read the caller's environment.
-  const res = await resolve(config, { force: false }, { ...ctx, env: {} });
+  const res = await resolve(config, onlineIncludeLoader({ ...ctx, env: {} }));
   return [...problems, ...res.problems];
 }
 

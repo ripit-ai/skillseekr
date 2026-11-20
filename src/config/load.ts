@@ -3,7 +3,7 @@ import { parseTree, getNodeValue, printParseErrorCode, type Node, type ParseErro
 import { z } from 'zod';
 import type { Auth, Config, Problem, RegistriesFile, RegistryEntry } from '../types.js';
 import type { Ctx } from '../context.js';
-import { configPath, defaultCacheDir, expandHome } from '../paths.js';
+import { configPath, libraryDir, relativeLibraryValues } from '../paths.js';
 
 const authSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('none') }),
@@ -34,11 +34,7 @@ const entrySchema = z.discriminatedUnion('type', [
   }),
 ]);
 
-const cacheSchema = z.object({
-  enabled: z.boolean().default(true),
-  ttl_seconds: z.number().nonnegative().default(3600),
-  dir: z.string().optional(),
-});
+const librarySchema = z.object({ dir: z.string().min(1).optional() });
 
 function lineOf(text: string, offset: number): string {
   const before = text.slice(0, offset);
@@ -110,7 +106,6 @@ function parseRegistries(root: Node, problems: Problem[], opts: { file: string; 
 
 export async function loadConfig(ctx: Ctx): Promise<Config> {
   const path = configPath(ctx);
-  const defaults = { enabled: true, ttlSeconds: 3600, dir: defaultCacheDir(ctx) };
   let text: string;
   try {
     text = await readFile(path, 'utf8');
@@ -118,25 +113,32 @@ export async function loadConfig(ctx: Ctx): Promise<Config> {
     const err = e as NodeJS.ErrnoException;
     const missing = err.code === 'ENOENT' || err.code === 'ENOTDIR';
     return {
-      path, exists: false, registries: [], cache: defaults,
+      path, exists: false, registries: [], libraryDir: libraryDir(ctx),
       problems: [{
         level: 'error', code: missing ? 'config/missing' : 'config/unreadable', file: path,
         message: missing ? `Config file not found: ${path} (run \`skillseekr setup\`)` : `Cannot read config ${path}: ${err.message}`,
-      }],
+      }, ...relativeLibraryProblems(ctx, path)],
     };
   }
   const { root, file } = parseInternal(text, { file: path, isLocalConfig: true });
-  const cache = { ...defaults };
-  const cacheNode = root && root.type === 'object' ? child(root, 'cache') : undefined;
-  if (cacheNode) {
-    const c = cacheSchema.safeParse(getNodeValue(cacheNode));
-    if (c.success) {
-      cache.enabled = c.data.enabled;
-      cache.ttlSeconds = c.data.ttl_seconds;
-      if (c.data.dir) cache.dir = expandHome(c.data.dir, ctx.home);
-    } else {
-      file.problems.push({ level: 'error', code: 'config/invalid-entry', file: path, message: `${path}: invalid "cache" section (${c.error.issues.map((i) => i.message).join('; ')})` });
-    }
+  // The library replaced the cache: the section is still accepted, but has no effect.
+  if (root && root.type === 'object' && child(root, 'cache')) {
+    file.problems.push({ level: 'warning', code: 'config/cache-ignored', file: path, message: `${path}: the "cache" section no longer has any effect and can be removed; skills come from the library, which changes only on 'skillseekr update'` });
   }
-  return { path, exists: true, registries: file.registries, problems: file.problems, cache };
+  let configuredLib: string | undefined;
+  const libNode = root && root.type === 'object' ? child(root, 'library') : undefined;
+  if (libNode) {
+    const l = librarySchema.safeParse(getNodeValue(libNode));
+    if (l.success) configuredLib = l.data.dir;
+    else file.problems.push({ level: 'error', code: 'config/invalid-entry', file: path, message: `${path}: invalid "library" section (${l.error.issues.map((i) => i.message).join('; ')})` });
+  }
+  file.problems.push(...relativeLibraryProblems(ctx, path, configuredLib));
+  return { path, exists: true, registries: file.registries, problems: file.problems, libraryDir: libraryDir(ctx, configuredLib) };
 }
+
+/** A relative library path would land wherever the process happens to run: rejected, the default is used. */
+const relativeLibraryProblems = (ctx: Ctx, path: string, configured?: string): Problem[] =>
+  relativeLibraryValues(ctx, configured).map(({ from, value }) => ({
+    level: 'error', code: 'config/invalid-entry', file: path,
+    message: `${from} ${JSON.stringify(value)} is not an absolute path; using the default library ${libraryDir({ ...ctx, env: {} })}`,
+  }));

@@ -104,7 +104,7 @@ export function registerRegistries(program: Command, cli: Cli): void {
       }
       await writeAtomic(file, next);
       if (isJson(cmd)) return printJson(cli.io, { added: name, file });
-      cli.io.out(`added registry "${name}" to ${file}\n`);
+      cli.io.out(`added registry "${name}" to ${file}\nrun 'skillseekr update' to apply\n`);
     });
 
   reg.command('remove <name>').description('remove a registry from the local config (keeps comments)')
@@ -115,6 +115,6 @@ export function registerRegistries(program: Command, cli: Cli): void {
       try { next = removeRegistry(text, name); } catch (e) { throw new CliError(e instanceof Error ? e.message : String(e)); }
       await writeAtomic(file, next);
       if (isJson(cmd)) return printJson(cli.io, { removed: name, file });
-      cli.io.out(`removed registry "${name}" from ${file}\n`);
+      cli.io.out(`removed registry "${name}" from ${file}\nrun 'skillseekr update' to apply\n`);
     });
 }

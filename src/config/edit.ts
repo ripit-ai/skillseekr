@@ -43,11 +43,6 @@ export function defaultConfigText(opts: { owner: string; repo: string; name: str
     }
     // Personal additions go below. Anything here is resolved after the entry above,
     // so it overrides its skills or registries with the same name.
-  },
-  "cache": {
-    "enabled": true,
-    "ttl_seconds": 3600,
-    "dir": "~/.cache/skillseekr"
   }
 }
 `;

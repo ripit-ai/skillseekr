@@ -99,21 +99,23 @@ describe('loadConfig', () => {
     expect(cfg.problems).toContainEqual({ level: 'error', code: 'config/missing', message: expect.any(String), file: '/nonexistent/c.jsonc' });
   });
 
-  it('cache.dir "~/x" expands to home/x', async () => {
+  it('a cache section (valid or not) is ignored with one config/cache-ignored warning naming the file', async () => {
     const d = mkdtempSync(join(tmpdir(), 'ss-'));
     const p = join(d, 'c.jsonc');
-    writeFileSync(p, `{"registries":{},"cache":{"enabled":false,"ttl_seconds":10,"dir":"~/x"}}`);
-    const cfg = await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }, '/home/me'));
-    expect(cfg.exists).toBe(true);
-    expect(cfg.cache).toEqual({ enabled: false, ttlSeconds: 10, dir: '/home/me/x' });
+    for (const cache of ['{"enabled":false,"ttl_seconds":10,"dir":"~/x"}', '{"ttl_seconds":"soon"}']) {
+      writeFileSync(p, `{"registries":{},"cache":${cache}}`);
+      const cfg = await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }, '/home/me'));
+      expect(cfg.exists).toBe(true);
+      expect(cfg).not.toHaveProperty('cache');
+      expect(cfg.problems).toEqual([{ level: 'warning', code: 'config/cache-ignored', file: p, message: expect.stringContaining('"cache"') }]);
+    }
   });
 
-  it('default cache dir honours XDG_CACHE_HOME and defaults enabled/ttl', async () => {
+  it('no cache section means no warning', async () => {
     const d = mkdtempSync(join(tmpdir(), 'ss-'));
     const p = join(d, 'c.jsonc');
     writeFileSync(p, `{"registries":{}}`);
-    const cfg = await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p, XDG_CACHE_HOME: '/xc' }));
-    expect(cfg.cache).toEqual({ enabled: true, ttlSeconds: 3600, dir: '/xc/skillseekr' });
+    expect((await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }))).problems).toEqual([]);
   });
 
   it('reports a parse error in an existing file', async () => {
@@ -157,5 +159,34 @@ describe('loadConfig', () => {
     const cfg = await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }));
     expect(cfg.problems).toEqual([]);
     expect(cfg.registries.map(([n]) => n)).toEqual(['a']);
+  });
+});
+
+describe('loadConfig library.dir', () => {
+  const withConfig = (text?: string) => {
+    const dir = mkdtempSync(join(tmpdir(), 'skillseekr-lib-'));
+    const p = join(dir, 'c.jsonc');
+    if (text !== undefined) writeFileSync(p, text);
+    return p;
+  };
+  it('reads library.dir, expanding ~', async () => {
+    const p = withConfig('{ "library": { "dir": "~/mylib" }, "registries": {} }');
+    expect((await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }))).libraryDir).toBe('/home/u/mylib');
+  });
+  it('defaults with no config file', async () => {
+    const p = withConfig();
+    expect((await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }))).libraryDir).toBe('/home/u/.skillseekr/library');
+  });
+  it('rejects a relative library.dir: config/invalid-entry naming it, default dir used', async () => {
+    const p = withConfig('{ "library": { "dir": "mylib" }, "registries": {} }');
+    const cfg = await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }));
+    expect(cfg.libraryDir).toBe('/home/u/.skillseekr/library');
+    expect(cfg.problems).toEqual([expect.objectContaining({ level: 'error', code: 'config/invalid-entry', message: expect.stringContaining('"mylib"') })]);
+  });
+  it('rejects a relative $SKILLSEEKR_LIBRARY: config/invalid-entry naming it, default dir used', async () => {
+    const p = withConfig('{ "registries": {} }');
+    const cfg = await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p, SKILLSEEKR_LIBRARY: 'rel/lib' }));
+    expect(cfg.libraryDir).toBe('/home/u/.skillseekr/library');
+    expect(cfg.problems).toEqual([expect.objectContaining({ level: 'error', code: 'config/invalid-entry', message: expect.stringContaining('"rel/lib"') })]);
   });
 });

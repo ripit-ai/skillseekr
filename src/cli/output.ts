@@ -53,6 +53,7 @@ export function reportProblems(io: Io, problems: Problem[], stale: boolean): voi
 export async function blockingError(cli: Cli, problems: Problem[], skillTotal: number): Promise<CliError | undefined> {
   if (skillTotal > 0) return undefined;
   const errs = errorProblems(problems);
+  if (errs.some((p) => p.code === 'library/empty')) return new CliError("the skill library is empty; run 'skillseekr update'", 2);
   if (errs.some((p) => p.code.startsWith('config/'))) {
     return new CliError('the configuration prevents loading any skills (see the problems above)', 2);
   }
@@ -64,8 +65,8 @@ export async function blockingError(cli: Cli, problems: Problem[], skillTotal: n
 }
 
 /** Loads the catalog, reports problems, and throws exit 2 if nothing usable could be loaded. */
-export async function loadCatalog(cli: Cli, opts: { force?: boolean } = {}): Promise<Catalog> {
-  const catalog = await cli.engine().catalog(opts);
+export async function loadCatalog(cli: Cli): Promise<Catalog> {
+  const catalog = await cli.engine().catalog();
   reportProblems(cli.io, catalog.problems, catalog.stale);
   const blocked = await blockingError(cli, catalog.problems, catalog.skills.length);
   if (blocked) throw blocked;

@@ -6,7 +6,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { fetchHttp } from '../../src/net/http.js';
 import { fakeGithub } from '../helpers/fakeGithub.js';
+import { pull } from '../helpers/library.js';
 import { tmpDir } from '../helpers/tmp.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -15,7 +17,7 @@ const SHA = 'c'.repeat(40);
 
 // dist/ is built fresh by the vitest globalSetup (test/globalBuild.ts).
 describe('stdio end to end (built binary)', () => {
-  it('search → get → read_skill_file → install (project) over real stdio and real HTTP', async () => {
+  it('search → get → read_skill_file → install (project) over real stdio, from a library pulled over real HTTP', async () => {
     const dir = await tmpDir();
     const home = join(dir, 'home');
     const cache = join(dir, 'xdg-cache');
@@ -35,15 +37,23 @@ describe('stdio end to end (built binary)', () => {
 
     const config = join(dir, 'config.jsonc');
     await writeFile(config, JSON.stringify({
-      cache: { dir: join(dir, 'skill-cache') },
+      library: { dir: join(dir, 'library') },
       registries: { acme: { type: 'github', owner: 'acme', repo: 'skills', skills_dir: 'skills', ref: 'main', auth: { type: 'none' } } },
     }));
+
+    const api = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    // The server only reads the library, so fill it first (over real HTTP).
+    await pull({
+      env: { SKILLSEEKR_CONFIG: config }, home, cwd: project, http: fetchHttp(),
+      exec: async () => ({ code: 1, stdout: '', stderr: '' }), now: () => Date.now(), githubApi: api,
+    });
+    const pulled = fake.calls.length;
 
     let stderr = '';
     const env: Record<string, string> = {
       PATH: process.env.PATH ?? '', HOME: home, XDG_CACHE_HOME: cache,
       SKILLSEEKR_CONFIG: config,
-      SKILLSEEKR_GITHUB_API: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      SKILLSEEKR_GITHUB_API: api,
     };
     const transport = new StdioClientTransport({ command: process.execPath, args: [bin, 'mcp'], cwd: project, env, stderr: 'pipe' });
     transport.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
@@ -59,6 +69,7 @@ describe('stdio end to end (built binary)', () => {
       await client.connect(transport);
       const { tools } = await client.listTools();
       expect(tools.map((t) => t.name)).toContain('search_skills');
+      expect(tools.map((t) => t.name)).toContain('update_skills');
 
       const search = await call('search_skills', { query: 'fill pdf forms' });
       expect(search.isError).toBe(false);
@@ -75,6 +86,7 @@ describe('stdio end to end (built binary)', () => {
       const marker = JSON.parse(await readFile(join(project, '.claude', 'skills', 'pdf-forms', '.skillseekr.json'), 'utf8'));
       expect(marker).toMatchObject({ id: 'pdf-forms', name: 'pdf-forms', registry: 'acme', sha: SHA });
       expect(await readFile(join(project, '.claude', 'skills', 'pdf-forms', 'SKILL.md'), 'utf8')).toContain('PDF BODY');
+      expect(fake.calls).toHaveLength(pulled); // the server made no request
     } catch (e) {
       if (stderr) process.stderr.write(`server stderr:\n${stderr}\n`);
       throw e;

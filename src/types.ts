@@ -33,5 +33,4 @@ export interface RegistriesFile {
   registries: Array<[name: string, entry: RegistryEntry]>;
   problems: Problem[];
 }
-export interface CacheSettings { enabled: boolean; ttlSeconds: number; dir: string /* absolute */ }
-export interface Config extends RegistriesFile { path: string; exists: boolean; cache: CacheSettings }
+export interface Config extends RegistriesFile { path: string; exists: boolean; libraryDir: string /* absolute */ }

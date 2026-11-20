@@ -27,6 +27,7 @@ Test file paths are relative to the repo root. "Manual" steps need a machine wit
 | AC-9 | Automated for the mechanics, manual for "each tool picks it up" | Both |
 | AC-10 | Automated | Test |
 | AC-11 | Automated | Test |
+| AC-12 | Automated, plus a short manual check | Both |
 
 ## AC-1: all four tools can call `search_skills` and `get_skill` after `setup`
 
@@ -65,7 +66,7 @@ Automated, partial. `test/e2e/stdio.test.ts` > "search → get → read_skill_fi
 - `test/resolve/resolve.test.ts` > "inaccessible registry is reported by name and others still load"
 - `test/doctor.test.ts` > "doctor reports config parse, each registry's access (fail names the registry), include loops, overrides (warn), unauthenticated GitHub sources (warn: rate limits), MCP registration per detected tool, and skill folder paths"
 - `test/cli/cli.test.ts` > "a sole inaccessible github-registry include exits 2 and names it; registries still prints first"
-- Recovery in a long-running server: `test/auth.test.ts` > "gh_cli does not keep a failure: after 30s it asks gh again and picks up a new login"; `test/engine.test.ts` > "a load with an error-level problem is retried after 60s even when the TTL is longer"
+- Recovery in a long-running server: `test/auth.test.ts` > "gh_cli does not keep a failure: after 30s it asks gh again and picks up a new login"; `test/engine.test.ts` > "an unreachable registry is a problem with registry and via; others still load", "a source that failed in the last update is stale with its previous skills; registries() shows fetchedAt"
 
 ## AC-3: an agent finds and uses a relevant skill without being told its name
 
@@ -102,7 +103,7 @@ Manual, by eval harness. See the header of `evals/discovery/run.mjs` for the ful
 - `test/config/load.test.ts` > "accepts a skills-mcp format example config"
 - `test/resolve/resolve.test.ts` > "a skills-mcp-only config (github + http) resolves to the same entries, in order, with via = [name]"
 - `test/auth.test.ts` > "github_token reads the named env var and sends "Authorization: Bearer <value>"", "bearer sends Bearer and basic encodes user:pass as base64"
-- Cache and ref behaviour: `test/sources/github.test.ts` > "force re-checks a branch ref regardless of ttl" and the TTL/SHA tests in the same file; `test/sources/http.test.ts` > "uses the same caching: TTL, ETag 304, stale fallback"
+- Ref behaviour and the ignored `cache` section: `test/sources/github.test.ts` > "a sha ref makes no /commits/ request", "a knownSha equal to the ref sha is unchanged and downloads nothing"; `test/library/pull.test.ts` > "an unchanged SHA downloads no tarball and reports no changes", "http source: staged under http/<hash>/<skill_name>, a 304 keeps the copy"; `test/config/load.test.ts` > "a cache section (valid or not) is ignored with one config/cache-ignored warning naming the file", "no cache section means no warning"
 
 ## AC-6: includes, last wins, IDs, bare names, loops, overrides shown
 
@@ -123,7 +124,7 @@ Manual, by eval harness. See the header of `evals/discovery/run.mjs` for the ful
 ## AC-8: `policy: true` counts only in the local config
 
 - `test/config/load.test.ts` > "honours policy:true in the local config", "ignores policy:true when not the local config"
-- `test/resolve/resolve.test.ts` > "cache in included file is ignored; policy only set for depth-1 includes from local config"
+- `test/resolve/resolve.test.ts` > "policy only set for depth-1 includes from local config"
 
 ## AC-8b: included files cannot use `github_token`, `bearer` or `basic`
 
@@ -154,17 +155,36 @@ If a tool does not list the skill, record which tool and its version: that break
 - `test/setup/setup.test.ts` > "setup twice changes nothing the second time"
 - Manual: run `skillseekr setup --yes` twice. The second run prints `nothing to change`.
 
-## AC-11: offline search and fetch work from cache, flagged stale
+## AC-11: offline search and fetch work from the library, flagged stale
 
-- `test/engine.test.ts` > "offline after a successful load → catalog.stale === true and skills still present"
-- `test/sources/github.test.ts` > "offline with a previous resolution returns the cached tree with stale: true and a warning problem"; `test/sources/http.test.ts` > "serves stale from the cache when offline, embedding the error"
-- `test/cli/cli.test.ts` > "stale catalog prints a one-line warning to stderr"
-- Manual: run `skillseekr sync` online, disconnect the network, run `skillseekr search pdf` and `skillseekr show <skill>`. Expected: results appear and stderr says `warning: catalog may be stale (offline or failing sources)`. Through MCP, `search_skills` results carry `"stale": true`.
+- `test/engine.test.ts` > "after a pull, serves the catalog from the library with no request (include, via, sha, absolute dirs)", "a source that failed in the last update is stale with its previous skills; registries() shows fetchedAt"
+- `test/library/pull.test.ts` > "one of two sources failing: the other still updates", "gh logged out on a private repo: previous folder kept, record stale, hint to gh auth login", "includes are stored in the library and a failed include falls back to that copy, stale"
+- `test/cli/cli.test.ts` > "stale catalog prints a one-line warning to stderr", "read commands against a pulled library never touch the network"
+- Manual: run `skillseekr update` online, disconnect the network, run `skillseekr search pdf` and `skillseekr show <skill>`. Expected: results appear and no warning (the library is current). To see staleness, run `skillseekr update` offline: the registries keep their previous copy, and later `search` prints `warning: catalog may be stale (offline or failing sources)` on stderr. Through MCP, `search_skills` results carry `"stale": true`.
+
+## AC-12: only `update` and `validate` go online; updates are safe
+
+The skill-library requirement; see [the design](superpowers/specs/2026-11-19-skill-library-design.md).
+
+- No other command touches the network: `test/cli/cli.test.ts` > "read commands against a pulled library never touch the network"; `test/engine.test.ts` > "no library: empty catalog with a library/empty error, and no request is made"; `test/doctor.test.ts` > "a pulled library is ok with its dir, time and skill count; no request is made"; `test/setup/setup.test.ts` > "with neither yes nor confirmUpdate it skips and makes no request"
+- Empty library and config changes: `test/engine.test.ts` > "a config edited after the pull changes nothing that reads see, makes no request, and warns (Review Focus 1)", "missing config → config/missing naming the path and library/empty, no throw"; `test/mcp/server.test.ts` > "library-empty gates the catalog tools; update_skills fills it"; `test/cli/cli.test.ts` > "update on an empty library pulls it and lists the changes; search before it exits 2"
+- The pull: `test/library/pull.test.ts` > "first pull writes the manifest and the tree, reports added skills, library is 0700", "change list: changed, added, then removed", "two refs of the same repo get two folders and both sets of skills", "two entries for the same owner/repo/ref share one folder"
+- Pruning and config safety: `test/library/pull.test.ts` > "a source removed from the config is pruned", "with an invalid entry in the config nothing is pruned and the old record is carried over stale", "a missing or unparsable config aborts and leaves the library byte-identical", "a missing config with no library does not create the library"
+- Interrupted or failed updates: `test/library/pull.test.ts` > "leftover .staging and .old-* folders from a crash are removed", "a failed manifest write rolls every swap back: old trees, include files and manifest intact", "an unwritable library parent gives library/write-failed naming the path, without throwing", "beforeSwap rejecting a source keeps its previous copy with library/rejected", "beforeSwap abort changes nothing"
+- Hand edits: `test/library/pull.test.ts` > "a hand-edited SKILL.md is reported by verifyFolders and re-downloaded by the next pull"; `test/library/verify.test.ts`; `test/doctor.test.ts` > "a hand-edited file is listed by library:edited"
+- The lock: `test/library/lock.test.ts` (second acquire, dead-holder takeover, concurrent acquires); `test/library/pull.test.ts` > "a held lock makes a concurrent pull reject with LockBusyError"; `test/library/update.test.ts` > "a held lock aborts with library/lock-busy"
+- Path safety: `test/library/layout.test.ts`; `test/library/manifest.test.ts` > "rejects escaping folder or skill dir"; `test/library/pull.test.ts` > "hostile owner/repo/skill_name are failed sources and nothing is written outside the library"; `test/sources/github.test.ts` > "hostile tarballs write nothing outside intoDir"
+- `update` command: `test/library/update.test.ts` > "refreshes outdated project and user installs in one call; skips a modified one unless forced", "installs: false leaves both installs untouched"; `test/cli/cli.test.ts` > "update --json prints an UpdateReport", "update --user is a usage error; --no-installs leaves installs alone", "update exits 1 naming the path when the library cannot be written", "registries add and remove print the update hint"
+- MCP `update_skills`: `test/mcp/server.test.ts` > "listTools includes update_skills with the exact description", "update_skills has no force input and leaves a locally modified install alone, with a hint", "a running server sees a library updated by another process"
+- Setup's update prompt: `test/setup/setup.test.ts` > "runs the update after a y/Y/yes answer and skips it for anything else", "yes runs the update without asking", "a second run with nothing to change still asks"; `test/cli/cli.test.ts` > "setup prompt: only y/yes (any case, trimmed) runs the update; the real prompt is used", "setup shows install results of its update: table, modified hint, missing-from-catalog hint, failures", "setup exits 1 when its confirmed update is aborted (held lock)"
+- `doctor` library checks: `test/doctor.test.ts` > "an empty library is a warn and nothing fails from library state", "a lock held by a dead pid is a warn; a changed config warns library:config", "a cache section warns config:cache"
+- End to end: `test/e2e/stdio.test.ts` > "search → get → read_skill_file → install (project) over real stdio, from a library pulled over real HTTP"
+- Manual: in a scratch HOME, `skillseekr setup --yes` (pulls the library), then `ls ~/.skillseekr/library` (expect `manifest.json` and `github/…`). Edit `~/.config/skillseekr/config.jsonc` and run `skillseekr registries`: expect the warning `the config changed since the last update; run 'skillseekr update' to apply it`. Run `skillseekr update`: expect `updated N registries: …`. Answer `n` (or press Enter) at `Update the skill library now? [y/N] ` in an interactive `skillseekr setup`: expect `skipped; run 'skillseekr update' when you're ready`.
 
 ## Also covered: a long-running MCP server stays current
 
 Not an acceptance criterion, but the MCP server runs for a whole tool session:
 
-- `test/engine.test.ts` > "a config file edit reloads the memo even before the TTL", "a sync (forced load) in another process reloads this engine; the syncing engine keeps its own result", "a load with an error-level problem is retried after 60s even when the TTL is longer", "concurrent callers after an expiry share one reload"
+- `test/engine.test.ts` > "a manifest rewritten by a second pull is served by the same engine on its next call", "a config file edit reloads the memo (for the config-changed check)", "memoizes concurrent and repeated calls"; `test/mcp/server.test.ts` > "a running server sees a library updated by another process"
 - `test/auth.test.ts` > "gh_cli does not keep a failure: after 30s it asks gh again and picks up a new login"
 - Large `SKILL.md`: `test/mcp/server.test.ts` > "get_skill returns metadata instead of the body for a SKILL.md over 1 MB"; `test/cli/cli.test.ts` > "show prints metadata instead of a SKILL.md over 1 MB"; `test/catalog/discover.test.ts` > "a SKILL.md over 1 MB is indexed by folder name without parsing frontmatter, with a warning"

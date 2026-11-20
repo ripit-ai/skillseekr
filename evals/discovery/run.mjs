@@ -16,8 +16,11 @@
  *        { "registries": { "eval": { "type": "github-registry", "owner": "ripit-ai",
  *            "repo": "skillseekr", "ref": "main", "path": "evals/discovery/registry/registries.jsonc",
  *            "auth": { "type": "gh_cli" } } } }
- *   3. Run with it: SKILLSEEKR_CONFIG=/tmp/eval-config.jsonc node evals/discovery/run.mjs --tool claude
- *      The agent's skillseekr MCP server inherits the variable, so only the ten eval skills are visible.
+ *   3. Fill an eval-only library from it, then run with both variables set:
+ *        export SKILLSEEKR_CONFIG=/tmp/eval-config.jsonc SKILLSEEKR_LIBRARY=/tmp/eval-library
+ *        skillseekr update && node evals/discovery/run.mjs --tool claude
+ *      The agent's skillseekr MCP server inherits the variables, so only the ten eval skills are visible
+ *      (and your own library is left alone).
  *      Run `skillseekr setup` first so each tool has the MCP server registered (AC-1).
  *   4. Don't install any of the eval skills into a tool's skill folder, or the agent can find them
  *      without calling search_skills.

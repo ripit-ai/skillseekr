@@ -10,6 +10,7 @@ import { doctor, type DoctorReport } from '../doctor.js';
 import { createEngine } from '../engine.js';
 import { installSkill, listInstalled } from '../install/installer.js';
 import { TOOL_TARGETS, type ToolId } from '../install/targets.js';
+import { runUpdate, type UpdateReport } from '../library/update.js';
 import { configPath } from '../paths.js';
 import type { Change } from './jsonMerge.js';
 import { claudeRegistrar, type ClaudeRegistrar } from './registrars/claude.js';
@@ -45,9 +46,11 @@ export interface SetupOptions {
   vscodeWorkspace?: string;
   /** Asked once, with the planned changes, when `yes` is false and there is something to change. */
   confirm?: (planned: Change[]) => Promise<boolean>;
+  /** Asked after applying, when `yes` is false: whether to update the skill library now. */
+  confirmUpdate?: () => Promise<boolean>;
 }
 
-export interface SetupResult { changes: Change[]; doctor: DoctorReport; errors: string[]; aborted?: boolean }
+export interface SetupResult { changes: Change[]; update: UpdateReport | { skipped: true }; doctor: DoctorReport; errors: string[]; aborted?: boolean }
 
 export function allRegistrars(opts: { vscodeWorkspace?: string } = {}): Registrar[] {
   return [claudeRegistrar(), opencodeRegistrar(), copilotCliRegistrar(), vscodeRegistrar({ workspace: opts.vscodeWorkspace })];
@@ -92,7 +95,7 @@ const isToolId = (id: SetupTool): id is ToolId => id !== 'vscode';
 
 /**
  * Writes the config if missing, registers the MCP server with each detected tool, installs the starter skill
- * into each tool's user skill folder (not Claude's when the plugin bundles it), then runs doctor.
+ * into each tool's user skill folder (not Claude's when the plugin bundles it), then (with consent) updates the skill library and runs doctor.
  * Idempotent: a second run returns no changes and rewrites nothing.
  */
 export async function setup(ctx: Ctx, opts: SetupOptions): Promise<SetupResult> {
@@ -141,7 +144,7 @@ export async function setup(ctx: Ctx, opts: SetupOptions): Promise<SetupResult> 
 
   if (planned.length > 0 && !opts.yes) {
     if (!opts.confirm) throw new Error('setup needs confirmation: pass yes, or a confirm function');
-    if (!(await opts.confirm(planned))) return { changes: [], doctor: { checks: [] }, errors: [], aborted: true };
+    if (!(await opts.confirm(planned))) return { changes: [], update: { skipped: true }, doctor: { checks: [] }, errors: [], aborted: true };
   }
 
   // Apply.
@@ -174,5 +177,19 @@ export async function setup(ctx: Ctx, opts: SetupOptions): Promise<SetupResult> 
     }
   }
 
-  return { changes, doctor: await doctor(createEngine(ctx), ctx, { vscodeWorkspace: opts.vscodeWorkspace }), errors };
+  // The library update: only with consent (yes, or the confirmUpdate answer); otherwise no request is made.
+  let update: SetupResult['update'] = { skipped: true };
+  if (opts.yes || (await opts.confirmUpdate?.()) === true) {
+    try {
+      update = await runUpdate(ctx, { force: false, installs: true, projectDir: ctx.cwd });
+      if (update.aborted) {
+        const first = update.problems.find((p) => p.level === 'error');
+        errors.push(`library update: ${first?.message ?? 'the update was aborted'}`);
+      }
+    } catch (e) {
+      errors.push(`library update: ${msg(e)}`);
+    }
+  }
+
+  return { changes, update, doctor: await doctor(createEngine(ctx), ctx, { vscodeWorkspace: opts.vscodeWorkspace }), errors };
 }

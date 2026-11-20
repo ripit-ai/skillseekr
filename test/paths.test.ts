@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { configPath, defaultCacheDir, expandHome } from '../src/paths.js';
+import { configPath, expandHome, libraryDir } from '../src/paths.js';
 import type { Ctx } from '../src/context.js';
 
 const mk = (env: Record<string, string | undefined>): Ctx =>
@@ -17,14 +17,27 @@ describe('configPath', () => {
   });
 });
 
-describe('defaultCacheDir / expandHome', () => {
-  it('honours XDG_CACHE_HOME, else ~/.cache', () => {
-    expect(defaultCacheDir(mk({ XDG_CACHE_HOME: '/xc' }))).toBe('/xc/skillseekr');
-    expect(defaultCacheDir(mk({}))).toBe('/home/u/.cache/skillseekr');
-  });
+describe('expandHome', () => {
   it('expands ~ only at the start', () => {
     expect(expandHome('~', '/h')).toBe('/h');
     expect(expandHome('~/x', '/h')).toBe('/h/x');
     expect(expandHome('/a/~/x', '/h')).toBe('/a/~/x');
+  });
+});
+
+describe('libraryDir', () => {
+  it('env wins over config', () => {
+    expect(libraryDir(mk({ SKILLSEEKR_LIBRARY: '/e/lib' }), '/c/lib')).toBe('/e/lib');
+  });
+  it('config expands ~', () => {
+    expect(libraryDir(mk({}), '~/x')).toBe('/home/u/x');
+  });
+  it('ignores a relative value and uses the default', () => {
+    expect(libraryDir(mk({ SKILLSEEKR_LIBRARY: 'rel' }), '/c/lib')).toBe('/home/u/.skillseekr/library');
+    expect(libraryDir(mk({}), 'rel')).toBe('/home/u/.skillseekr/library');
+    expect(libraryDir(mk({}), '~x')).toBe('/home/u/.skillseekr/library');
+  });
+  it('defaults to ~/.skillseekr/library', () => {
+    expect(libraryDir(mk({}))).toBe('/home/u/.skillseekr/library');
   });
 });

@@ -85,7 +85,8 @@ async function installInto(skill: SkillRecord, parent: string, folder: string, c
       id: skill.id, name: skill.name, registry: skill.registry, via: skill.via,
       ...(skill.ref !== undefined && { ref: skill.ref }),
       ...(skill.sha !== undefined && { sha: skill.sha }),
-      contentHash: skill.contentHash,
+      // From the files actually copied, so a marker can never record a hash that doesn't match its install.
+      contentHash: (await contentHash(tmp)).hash,
       installedAt: new Date(ctx.now()).toISOString(),
     };
     await writeFile(join(tmp, MARKER_FILE), JSON.stringify(marker, null, 2) + '\n');
