@@ -284,7 +284,7 @@ The server runs over stdio. These are the tools agents see:
 | `list_registries` | — | the resolved, flat registry list in order, with each registry's include chain (`via`), resolved SHA, `fetchedAt` (last successful fetch), and any overrides |
 | `update_skills` | optional `skill` (limits the install refresh) | Updates the library and refreshes installed skills, returning what `update --json` returns. Has **no `force`**: it never overwrites locally edited installs. When it skips edited installs the result carries a hint that the user can run `skillseekr update --force`. *(Removed `force` after a security review: an agent must not overwrite the user's local edits.)* |
 
-With no library yet, the catalog tools return a `library-empty` error naming the catalog's error problems. Consent for `update_skills` is **not enforced by the server**: the guard is the tool description, the server instructions and the client's own tool-permission prompt. Agents can't **remove** skills, **change registries** or **force** an update. Both stay human actions through the CLI. *(My call.)*
+With no library yet, the catalog tools return a `library-empty` error naming the catalog's error problems. Consent for `update_skills` is **not enforced by the server**: the guard is the tool description, the server instructions and the client's own tool-permission prompt. Agents can't **remove** skills, **change registries** or **force** an update. These stay human actions through the CLI. *(My call.)*
 
 The server's instructions, plus the starter skill below, tell agents to:
 1. search before starting specialized or unfamiliar work,
@@ -309,7 +309,7 @@ Call `search_skills` with a short description of the task. If a result fits, cal
 
 | Command | What it does |
 |---|---|
-| `skillseekr setup [--tools claude,opencode,copilot] [--yes]` | Writes the config if it's missing (without a `cache` section), registers the MCP server and starter skill with each tool it finds, asks `Update the skill library now? [y/N] ` (only `y`/`yes` runs a full update; `--yes` counts as yes; with no terminal it is skipped with `skipped; run 'skillseekr update' when you're ready`; an aborted confirmed update makes setup exit 1), then runs `doctor`. Safe to re-run and able to run unattended. |
+| `skillseekr setup [--tools claude,opencode,copilot] [--yes]` | Writes the config if it's missing (without a `cache` section), registers the MCP server and starter skill with each tool it finds, asks `Update the skill library now? [y/N] ` (only `y`/`yes` runs a full update; `--yes` counts as yes; with no terminal and no `--yes` it is skipped with `skipped; run 'skillseekr update' when you're ready`; an aborted confirmed update makes setup exit 1), then runs `doctor`. Safe to re-run and able to run unattended. |
 | `skillseekr search <query>` | Searches the resolved catalog (same engine as the MCP tool). |
 | `skillseekr show <id\|name>` | Prints the metadata, registry, include chain (`via`), overrides, file list, and `SKILL.md`. |
 | `skillseekr install <id\|name> [--user]` | Installs to the project (default) or user scope. |

@@ -120,12 +120,13 @@ A failed `gh auth token` is retried after 30 seconds, so an `update_skills` call
 
 skillseekr keeps the skills it knows about in a local library. It changes only when you run `skillseekr update` (or confirm the update in `setup`, or an agent calls `update_skills` at your request). Every other command works from the library alone and makes no network request, except `validate`, which checks a registries file over the network and never touches the library.
 
-- **Location:** `$SKILLSEEKR_LIBRARY`, else `library.dir` in your local config (`~` expanded), else `~/.skillseekr/library`, on every platform. Folders are mode `0700` and files `0600`. Files extracted from a registry's tarball keep the modes the tarball gives them, inside the `0700` library.
+- **Location:** `$SKILLSEEKR_LIBRARY`, else `library.dir` in your local config (`~` expanded), else `~/.skillseekr/library`, on every platform. The path must be absolute after `~` expansion: a relative `$SKILLSEEKR_LIBRARY` or `library.dir` is reported as a `config/invalid-entry` error and the default is used. Folders are mode `0700` and files `0600`. Files extracted from a registry's tarball keep the modes the tarball gives them, inside the `0700` library.
 - **Layout:**
 
   ```text
   ~/.skillseekr/library/
     manifest.json                         written last by every update
+    .skillseekr-library                   marks the folder as a library
     .lock                                 held while an update runs
     github/<owner>/<repo>@<ref>/          repo tree at the resolved commit
     registries/github/<owner>/<repo>@<ref>/<path>   included registries files
@@ -133,7 +134,8 @@ skillseekr keeps the skills it knows about in a local library. It changes only w
     http/<hash>/<skill_name>/SKILL.md     single-skill http sources
   ```
 
-  `<ref>` is percent-encoded (`feature/x` becomes `feature%2Fx`), and `<hash>` is the first 16 hex characters of the SHA-256 of the URL. Two entries with the same owner, repo and ref share one folder.
+  `<owner>` and `<repo>` are lowercased (GitHub treats them case-insensitively, as do macOS and Windows filesystems). `<ref>` is percent-encoded (`feature/x` becomes `feature%2Fx`), and `<hash>` is the first 16 hex characters of the SHA-256 of the URL. Two entries with the same owner, repo and ref share one folder.
+- **The marker.** The first update writes `.skillseekr-library` (mode `0600`) into the library; a library from an earlier version that has a `manifest.json` gets it on its next update. `update` refuses a non-empty folder that has neither file, with a `library/not-a-library` error naming the path, and changes nothing in it. Pruning deletes anything under `github/`, `http/` and `registries/` that the manifest does not use, so never point the library at a folder that holds other files.
 - **The manifest** (`manifest.json`) is the catalog: the resolved registries and includes (with `via`), overrides, problems, `updatedAt`, a hash of the config the update used, and for each source its folder, resolved commit SHA (github) or ETag (http), `fetchedAt` and its skill index. Reads load it instead of walking the trees. It is written atomically. A missing or invalid manifest means the library is empty.
 - **Updating** downloads everything into a staging folder first, then swaps each source in and writes the manifest last. A source that fails (network, auth, too large, bad archive) keeps its previous folder and manifest record, marked stale, and the failure is reported; the other sources still update. A source that has never succeeded is reported and has no skills. A failed manifest write rolls every swap back. A commit whose SHA is unchanged is not downloaded again. Only one update runs at a time (`.lock`); a lock left by a dead process is taken over.
 - **Pruning is conservative.** Folders for registries that are no longer in the config are deleted only when the resolution had no error problems (config parsed, every entry valid, every include fetched). Otherwise a source that went missing is kept, marked stale, with a warning. If the config is missing or does not parse, `update` stops and changes nothing. A failed include fetch falls back to the library's previous copy of that registries file, marked stale.
