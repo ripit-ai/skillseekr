@@ -11,6 +11,10 @@ describe('layout', () => {
     expect(githubFolder('o', 'r', 'feature/x')).toBe('github/o/r@feature%2Fx');
     expect(githubFolder('o', 'r', 'main')).not.toBe(githubFolder('o', 'r', 'dev'));
   });
+  it('githubFolder lowercases owner and repo (case-insensitive filesystems), not the ref', () => {
+    expect(githubFolder('Acme', 'Skills', 'Main')).toBe('github/acme/skills@Main');
+    expect(includeFile({ ...gh('a.jsonc'), owner: 'O', repo: 'R' })).toBe('registries/github/o/r@main/a.jsonc');
+  });
   it('includeFile rejects unsafe paths, names github and http files', () => {
     expect(includeFile(gh('../x'))).toBeUndefined();
     expect(includeFile(gh('a/b.jsonc'))).toBe('registries/github/o/r@main/a/b.jsonc');

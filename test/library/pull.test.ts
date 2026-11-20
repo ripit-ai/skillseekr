@@ -6,6 +6,7 @@ import { pullLibrary, pullHooks, pullFs } from '../../src/library/pull.js';
 import { verifyFolders } from '../../src/library/verify.js';
 import { acquireLock, LockBusyError } from '../../src/library/lock.js';
 import { readManifest, manifestFile } from '../../src/library/manifest.js';
+import { catalogFromManifest } from '../../src/library/catalog.js';
 import { resetGhTokenCache } from '../../src/auth.js';
 import type { Ctx, ExecResult } from '../../src/context.js';
 import type { Http } from '../../src/net/http.js';
@@ -77,7 +78,7 @@ describe('pullLibrary', () => {
     expect(m!.sources[0]!.fetchedAt).toBe(new Date(1_700_000_000_000).toISOString());
     expect(r.manifest).toEqual(m);
     // no staging or lock left behind
-    expect((await readdir(s.lib)).sort()).toEqual(['github', 'manifest.json']);
+    expect((await readdir(s.lib)).sort()).toEqual(['.skillseekr-library', 'github', 'manifest.json']);
   });
 
   it('an unchanged SHA downloads no tarball and reports no changes', async () => {
@@ -262,7 +263,7 @@ describe('pullLibrary', () => {
     await mkdir(join(s.lib, '.staging/x'), { recursive: true });
     await mkdir(join(s.lib, '.old-y/z'), { recursive: true });
     await pull(s.ctx);
-    expect((await readdir(s.lib)).sort()).toEqual(['github', 'manifest.json']);
+    expect((await readdir(s.lib)).sort()).toEqual(['.skillseekr-library', 'github', 'manifest.json']);
   });
 
   it('an unwritable library parent gives library/write-failed naming the path, without throwing', async () => {
@@ -336,7 +337,7 @@ describe('pullLibrary', () => {
       expect(r.problems.some((p) => p.level === 'error' && p.code === 'source/invalid' && p.registry === name), name).toBe(true);
     }
     expect((await readdir(s.dir)).sort()).toEqual(['config.jsonc', 'lib']);
-    expect((await readdir(s.lib)).sort()).toEqual(['github', 'manifest.json']);
+    expect((await readdir(s.lib)).sort()).toEqual(['.skillseekr-library', 'github', 'manifest.json']);
     expect(await readdir(join(s.lib, 'github'))).toEqual(['o']);
     expect(await readdir(join(s.lib, 'github/o'))).toEqual(['r@main']);
     expect(r.manifest!.sources.filter((x) => x.folder).map((x) => x.name)).toEqual(['r']);
@@ -389,5 +390,102 @@ describe('pullLibrary', () => {
     const later = await pull(s.ctx);
     expect(later.problems.some((p) => p.code === 'source/stale' && p.registry === 'inc')).toBe(true);
     expect(later.manifest!.sources.map((x) => [x.name, x.skills.length])).toEqual([['r', 1]]);
+  });
+});
+
+describe('pullLibrary: final-review fixes', () => {
+  it('#1 a failed update of a renamed registry keeps the good copy (no prune of its folder)', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await s.write({ team: gh('r') });
+    await pull(s.ctx);
+    delete s.repos['o/r']; // offline for o/r
+    await s.write({ 'team-skills': gh('r') });
+    const r = await pull(s.ctx);
+    expect(await readFile(join(s.lib, 'github/o/r@main/skills/a/SKILL.md'), 'utf8')).toBe(skill('a'));
+    expect(r.manifest!.sources).toHaveLength(1);
+    expect(r.manifest!.sources[0]).toMatchObject({ name: 'team-skills', folder: 'github/o/r@main', stale: true, sha: SHA1 });
+    expect(r.manifest!.sources[0]!.skills.map((x) => x.id)).toEqual(['a']);
+    expect(await verifyFolders(s.lib, r.manifest!)).toEqual([]);
+  });
+
+  it('#2 a carried-over removed registry has the lowest precedence', async () => {
+    const deploy = (v: string) => `---\nname: deploy\ndescription: deploy ${v}\n---\n${v}\n`;
+    const s = await setup({
+      repos: { 'o/r': repoWith({ 'skills/deploy/SKILL.md': deploy('OLD') }), 'o/q': repoWith({ 'skills/deploy/SKILL.md': deploy('NEW') }) },
+    });
+    await s.write({ removed: gh('r'), keep: gh('q') });
+    const first = await pull(s.ctx);
+    expect(catalogFromManifest(s.lib, first.manifest!).catalog.byId('deploy')!.registry).toBe('keep');
+    await s.write({ keep: gh('q'), bad: { type: 'github' } });
+    const r = await pull(s.ctx);
+    expect(r.manifest!.sources.find((x) => x.name === 'removed')).toMatchObject({ stale: true });
+    expect(catalogFromManifest(s.lib, r.manifest!).catalog.byId('deploy')!.registry).toBe('keep');
+  });
+
+  it('#3 a non-empty directory that is not a library is refused and left untouched', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await mkdir(join(s.lib, 'github/myclone'), { recursive: true });
+    await writeFile(join(s.lib, 'github/myclone/precious.txt'), 'precious');
+    await s.write({ r: gh('r') });
+    const before = await snapshot(s.lib);
+    const r = await pullLibrary(s.ctx);
+    expect(r.aborted).toBe(true);
+    expect(r.problems).toEqual([expect.objectContaining({ level: 'error', code: 'library/not-a-library', message: expect.stringContaining(s.lib) })]);
+    expect(await snapshot(s.lib)).toEqual(before);
+    expect(s.github.calls).toEqual([]);
+  });
+
+  it('#3 a new library gets the 0600 marker; an existing one with a manifest gets it on its next pull', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await s.write({ r: gh('r') });
+    await pull(s.ctx);
+    const marker = join(s.lib, '.skillseekr-library');
+    expect((await stat(marker)).mode & 0o777).toBe(0o600);
+    await rm(marker);
+    await pull(s.ctx);
+    expect((await stat(marker)).isFile()).toBe(true);
+    // an empty existing directory is fine too
+    const t = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await mkdir(t.lib, { recursive: true });
+    await t.write({ r: gh('r') });
+    await pull(t.ctx);
+    expect((await stat(join(t.lib, '.skillseekr-library'))).isFile()).toBe(true);
+  });
+
+  it('#3 a relative $SKILLSEEKR_LIBRARY is rejected and nothing is written', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) }, lib: () => 'rel/lib' });
+    await s.write({ r: gh('r') });
+    const r = await pullLibrary(s.ctx);
+    expect(r.aborted).toBe(true);
+    expect(r.problems).toContainEqual(expect.objectContaining({ level: 'error', code: 'config/invalid-entry', message: expect.stringContaining('rel/lib') }));
+    expect(s.github.calls).toEqual([]);
+    await expect(stat(join(process.cwd(), 'rel'))).rejects.toThrow();
+  });
+
+  it('#5 an invalid entry (bad owner) blocks pruning', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }), 'o/q': repoWith({ 'skills/q/SKILL.md': skill('q') }) } });
+    await s.write({ r: gh('r'), q: gh('q') });
+    await pull(s.ctx);
+    await s.write({ q: gh('q'), evil: { type: 'github', owner: '..', repo: 'x', skills_dir: 'skills', ref: 'main' } });
+    const r = await pull(s.ctx);
+    expect((await readdir(join(s.lib, 'github/o'))).sort()).toEqual(['q@main', 'r@main']);
+    expect(r.manifest!.sources.find((x) => x.name === 'r')).toMatchObject({ stale: true, folder: 'github/o/r@main' });
+  });
+
+  it('#6 the pull result names the library dir', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await s.write({ r: gh('r') });
+    expect((await pull(s.ctx)).libDir).toBe(s.lib);
+  });
+
+  it('#7 a stale record is not carried over when a current source claimed its folder', async () => {
+    const s = await setup({ repos: { 'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }) } });
+    await s.write({ old: gh('r') });
+    await pull(s.ctx);
+    s.repos['o/r'] = repoWith({ 'skills/a/SKILL.md': skill('a', ' v2') }, SHA2);
+    await s.write({ fresh: gh('r'), bad: { type: 'github' } });
+    const r = await pull(s.ctx);
+    expect(r.manifest!.sources.filter((x) => x.folder === 'github/o/r@main').map((x) => x.name)).toEqual(['fresh']);
+    expect(await verifyFolders(s.lib, r.manifest!)).toEqual([]);
   });
 });

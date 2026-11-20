@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, sep } from 'node:path';
 import type { Ctx } from '../context.js';
 import { discoverSkills, type DiscoveredSkill } from '../catalog/discover.js';
@@ -7,7 +7,7 @@ import { onlineIncludeLoader, resolve, type IncludeLoader, type ResolvedRegistry
 import { fetchGithubTree, invalidRepo } from '../sources/github.js';
 import { fetchHttpBody, invalidSkillName } from '../sources/http.js';
 import type { IncludeEntry, Problem } from '../types.js';
-import { githubFolder, httpFolder, includeFile, STAGING } from './layout.js';
+import { githubFolder, httpFolder, includeFile, MARKER, OLD_PREFIX, STAGING } from './layout.js';
 import { acquireLock, LockBusyError } from './lock.js';
 import { configHash, MANIFEST_VERSION, manifestFile, readManifest, writeManifest, type IncludeRecord, type Manifest, type ManifestSkill, type SourceRecord } from './manifest.js';
 export { configHash } from './manifest.js';
@@ -16,7 +16,7 @@ import { textHash, verifyFolders } from './verify.js';
 
 export interface SkillChange { id: string; registry: string; change: 'added' | 'changed' | 'removed' }
 export interface StagedSource { name: string; folder: string /* library-relative target */; stagedDir: string /* absolute */ }
-export interface PullResult { aborted: boolean; manifest?: Manifest; changes: SkillChange[]; problems: Problem[]; stale: boolean }
+export interface PullResult { aborted: boolean; manifest?: Manifest; changes: SkillChange[]; problems: Problem[]; stale: boolean; /** Set when not aborted. */ libDir?: string }
 
 /** The security hook: runs after everything is staged, before anything goes live. Replaceable. */
 export const pullHooks = {
@@ -50,6 +50,9 @@ export async function pullLibrary(ctx: Ctx, deps: { discover?: typeof discoverSk
     return abort([err('config/unreadable', `Cannot read config ${config.path}: ${msg(e)}`)]);
   }
   const libDir = config.libraryDir;
+  if (await foreignDir(libDir)) {
+    return abort([err('library/not-a-library', `${libDir} is not empty and is not a skillseekr library (it has no ${MARKER} or manifest.json); refusing to update it`)]);
+  }
   let release: () => Promise<void>;
   try { release = await acquireLock(libDir, ctx); } catch (e) {
     if (e instanceof LockBusyError) throw e;
@@ -68,6 +71,11 @@ export async function pullLibrary(ctx: Ctx, deps: { discover?: typeof discoverSk
 async function pullLocked(
   ctx: Ctx, config: Awaited<ReturnType<typeof loadConfig>>, text: string, libDir: string, discover: typeof discoverSkills,
 ): Promise<PullResult> {
+  try {
+    await writeFile(join(libDir, MARKER), 'This folder is a skillseekr library. Its contents are replaced on `skillseekr update`.\n', { mode: 0o600, flag: 'wx' });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') return abort([writeFailed(join(libDir, MARKER), e)]);
+  }
   await cleanLeftovers(libDir);
   const prev = await readManifest(libDir);
   const badPrev = new Set(prev ? await verifyFolders(libDir, prev) : []);
@@ -213,10 +221,14 @@ async function pullLocked(
   const stale = res.stale || manifest.sources.some((s) => s.stale) || manifest.includes.some((i) => i.stale);
   await removeOld(swapped.flatMap((x) => (x.old ? [x.old] : [])));
   if (clean) {
-    const keep = [...manifest.sources.flatMap((s) => (s.folder ? [s.folder] : [])), ...manifest.includes.flatMap((i) => (i.file ? [i.file] : []))];
+    const keep = [
+      ...manifest.sources.flatMap((s) => (s.folder ? [s.folder] : [])), ...manifest.includes.flatMap((i) => (i.file ? [i.file] : [])),
+      // A failed fetch never costs the previous copy, whatever record (if any) now points at it.
+      ...[...groups.values()].filter((g) => g.outcome?.kind === 'failed').map((g) => g.folder),
+    ];
     for (const f of await prune(libDir, keep)) problems.push(err('library/write-failed', `cannot remove ${join(libDir, f)}, which is no longer used`));
   }
-  return { aborted: false, manifest, changes: diff(prev, manifest), problems, stale };
+  return { aborted: false, manifest, changes: diff(prev, manifest), problems, stale, libDir };
 
   async function swapAndRecord(): Promise<{ manifest: Manifest; clean: boolean }> {
     for (const g of groups.values()) {
@@ -238,14 +250,20 @@ async function pullLocked(
     }
 
     // ---- records ----
-    const sources: SourceRecord[] = [];
+    // A folder another source fetched this run holds that source's content, not an old record's.
+    const claimed = (folder: string) => groups.get(folder)?.outcome?.kind === 'staged' || groups.get(folder)?.outcome?.kind === 'kept';
+    let sources: SourceRecord[] = [];
     for (const reg of res.registries) {
       const g = [...groups.values()].find((x) => x.regs.includes(reg));
       const o: Outcome = g?.outcome ?? { kind: 'failed', error: invalid.get(reg.name)! };
       if (o.kind === 'failed') {
         problems.push(attach(o.error, reg));
-        const old = prev?.sources.find((s) => s.name === reg.name);
-        sources.push(old?.folder ? { ...old, stale: true } : { name: reg.name, via: reg.via, trusted: reg.trusted, entry: reg.entry, stale: false, skills: [] });
+        // The previous copy: by name, else (a renamed registry) the record that used this source's folder.
+        const byName = prev?.sources.find((s) => s.name === reg.name && s.folder && !claimed(s.folder));
+        const byFolder = g ? prev?.sources.find((s) => s.folder === g.folder) : undefined;
+        if (byName) sources.push({ ...byName, stale: true });
+        else if (byFolder) sources.push({ ...byFolder, name: reg.name, via: reg.via, trusted: reg.trusted, entry: reg.entry, stale: true });
+        else sources.push({ name: reg.name, via: reg.via, trusted: reg.trusted, entry: reg.entry, stale: false, skills: [] });
         continue;
       }
       sources.push({
@@ -270,16 +288,20 @@ async function pullLocked(
     });
 
     // Prune only after a clean resolution and no failed write; otherwise keep what went missing, marked stale.
-    const clean = !res.stale && !res.problems.some((p) => p.level === 'error') && !problems.some((p) => p.code === 'library/write-failed');
+    const clean = !res.stale && !res.problems.some((p) => p.level === 'error') && invalid.size === 0
+      && !problems.some((p) => p.code === 'library/write-failed');
     if (!clean && prev) {
+      // Carried records go first: they have the lowest precedence ("last wins").
+      const carried: SourceRecord[] = [];
       for (const old of prev.sources) {
-        if (sources.some((s) => s.name === old.name) || !old.folder) continue;
-        sources.push({ ...old, stale: true });
+        if (!old.folder || sources.some((s) => s.name === old.name || s.folder === old.folder)) continue;
+        carried.push({ ...old, stale: true });
         problems.push({
           level: 'warning', code: 'source/stale', registry: old.name, via: old.via,
           message: `registry "${old.name}" is no longer in the resolution, but the resolution had errors; keeping its previous copy until an update without errors`,
         });
       }
+      sources = [...carried, ...sources];
       for (const old of prev.includes) {
         if (old.file && !includes.some((i) => i.file === old.file)) includes.push({ ...old, stale: true });
       }
@@ -318,4 +340,11 @@ function diff(prev: Manifest | undefined, next: Manifest): SkillChange[] {
   }
   for (const [key, b] of before) if (!after.has(key)) changes.push({ id: b.id, registry: b.registry, change: 'removed' });
   return changes;
+}
+
+/** True when dir exists, holds something other than our own lock or leftovers, and has neither the marker nor a manifest. */
+async function foreignDir(dir: string): Promise<boolean> {
+  const names = await readdir(dir).catch(() => [] as string[]);
+  const own = (n: string) => n.startsWith('.lock') || n === STAGING || n.startsWith(OLD_PREFIX);
+  return names.some((n) => !own(n)) && !names.includes(MARKER) && !names.includes('manifest.json');
 }

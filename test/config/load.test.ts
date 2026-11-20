@@ -177,4 +177,16 @@ describe('loadConfig library.dir', () => {
     const p = withConfig();
     expect((await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }))).libraryDir).toBe('/home/u/.skillseekr/library');
   });
+  it('rejects a relative library.dir: config/invalid-entry naming it, default dir used', async () => {
+    const p = withConfig('{ "library": { "dir": "mylib" }, "registries": {} }');
+    const cfg = await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }));
+    expect(cfg.libraryDir).toBe('/home/u/.skillseekr/library');
+    expect(cfg.problems).toEqual([expect.objectContaining({ level: 'error', code: 'config/invalid-entry', message: expect.stringContaining('"mylib"') })]);
+  });
+  it('rejects a relative $SKILLSEEKR_LIBRARY: config/invalid-entry naming it, default dir used', async () => {
+    const p = withConfig('{ "registries": {} }');
+    const cfg = await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p, SKILLSEEKR_LIBRARY: 'rel/lib' }));
+    expect(cfg.libraryDir).toBe('/home/u/.skillseekr/library');
+    expect(cfg.problems).toEqual([expect.objectContaining({ level: 'error', code: 'config/invalid-entry', message: expect.stringContaining('"rel/lib"') })]);
+  });
 });

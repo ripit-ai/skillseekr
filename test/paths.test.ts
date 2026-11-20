@@ -32,6 +32,11 @@ describe('libraryDir', () => {
   it('config expands ~', () => {
     expect(libraryDir(mk({}), '~/x')).toBe('/home/u/x');
   });
+  it('ignores a relative value and uses the default', () => {
+    expect(libraryDir(mk({ SKILLSEEKR_LIBRARY: 'rel' }), '/c/lib')).toBe('/home/u/.skillseekr/library');
+    expect(libraryDir(mk({}), 'rel')).toBe('/home/u/.skillseekr/library');
+    expect(libraryDir(mk({}), '~x')).toBe('/home/u/.skillseekr/library');
+  });
   it('defaults to ~/.skillseekr/library', () => {
     expect(libraryDir(mk({}))).toBe('/home/u/.skillseekr/library');
   });

@@ -10,8 +10,12 @@ export const normUrl = (u: string): string => { try { return new URL(u).href; } 
 
 export const urlHash = (url: string): string => createHash('sha256').update(normUrl(url)).digest('hex').slice(0, 16);
 
+/** Owner and repo are lowercased: GitHub treats them case-insensitively, and so do macOS and Windows filesystems. */
 export const githubFolder = (owner: string, repo: string, ref: string): string =>
-  `github/${owner}/${repo}@${encodeURIComponent(ref)}`;
+  `github/${owner.toLowerCase()}/${repo.toLowerCase()}@${encodeURIComponent(ref)}`;
+
+/** Marks a directory as a skillseekr library, so a pull never prunes a directory it did not create. */
+export const MARKER = '.skillseekr-library';
 
 export const httpFolder = (url: string, skillName: string): string => `http/${urlHash(url)}/${skillName}`;
 

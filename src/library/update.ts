@@ -1,5 +1,4 @@
 import type { Ctx } from '../context.js';
-import { loadConfig } from '../config/load.js';
 import { updateInstalled, type UpdateResult } from '../install/installer.js';
 import type { Problem } from '../types.js';
 import { catalogFromManifest } from './catalog.js';
@@ -22,10 +21,10 @@ export async function runUpdate(ctx: Ctx, opts: UpdateOptions): Promise<UpdateRe
     return { aborted: true, registries: 0, skills: 0, changes: [], installs: [], problems, stale: false };
   }
   const { manifest } = pulled;
-  if (pulled.aborted || !manifest) {
+  if (pulled.aborted || !manifest || pulled.libDir === undefined) {
     return { aborted: true, registries: 0, skills: 0, changes: [], installs: [], problems: pulled.problems, stale: pulled.stale };
   }
-  const { catalog } = catalogFromManifest((await loadConfig(ctx)).libraryDir, manifest);
+  const { catalog } = catalogFromManifest(pulled.libDir, manifest);
   const installs = opts.installs
     ? await updateInstalled(catalog, ctx, { ...(opts.name !== undefined && { name: opts.name }), force: opts.force, projectDir: opts.projectDir })
     : [];

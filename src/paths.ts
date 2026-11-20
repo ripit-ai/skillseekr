@@ -1,4 +1,4 @@
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import type { Ctx } from './context.js';
 
 export function expandHome(p: string, home: string): string {
@@ -14,9 +14,15 @@ export function configPath(ctx: Ctx): string {
   return join(base, 'skillseekr', 'config.jsonc');
 }
 
-/** Library root: $SKILLSEEKR_LIBRARY, then the configured dir (`~` expanded), then ~/.skillseekr/library. */
+/** Library root: $SKILLSEEKR_LIBRARY, then the configured dir (`~` expanded), then ~/.skillseekr/library. A relative value is not used: the default is. */
 export function libraryDir(ctx: Ctx, configured?: string): string {
-  if (ctx.env.SKILLSEEKR_LIBRARY) return expandHome(ctx.env.SKILLSEEKR_LIBRARY, ctx.home);
-  if (configured) return expandHome(configured, ctx.home);
-  return join(ctx.home, '.skillseekr', 'library');
+  const chosen = ctx.env.SKILLSEEKR_LIBRARY || configured;
+  const dir = chosen ? expandHome(chosen, ctx.home) : undefined;
+  return dir && isAbsolute(dir) ? dir : join(ctx.home, '.skillseekr', 'library');
+}
+
+/** The library values (env, then config) that are relative after `~` expansion, so cannot be used. */
+export function relativeLibraryValues(ctx: Ctx, configured?: string): Array<{ from: string; value: string }> {
+  return [{ from: '$SKILLSEEKR_LIBRARY', value: ctx.env.SKILLSEEKR_LIBRARY }, { from: 'library.dir', value: configured }]
+    .filter((x): x is { from: string; value: string } => !!x.value && !isAbsolute(expandHome(x.value, ctx.home)));
 }

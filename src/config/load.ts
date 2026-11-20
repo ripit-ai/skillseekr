@@ -3,7 +3,7 @@ import { parseTree, getNodeValue, printParseErrorCode, type Node, type ParseErro
 import { z } from 'zod';
 import type { Auth, Config, Problem, RegistriesFile, RegistryEntry } from '../types.js';
 import type { Ctx } from '../context.js';
-import { configPath, libraryDir } from '../paths.js';
+import { configPath, libraryDir, relativeLibraryValues } from '../paths.js';
 
 const authSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('none') }),
@@ -117,7 +117,7 @@ export async function loadConfig(ctx: Ctx): Promise<Config> {
       problems: [{
         level: 'error', code: missing ? 'config/missing' : 'config/unreadable', file: path,
         message: missing ? `Config file not found: ${path} (run \`skillseekr setup\`)` : `Cannot read config ${path}: ${err.message}`,
-      }],
+      }, ...relativeLibraryProblems(ctx, path)],
     };
   }
   const { root, file } = parseInternal(text, { file: path, isLocalConfig: true });
@@ -132,5 +132,13 @@ export async function loadConfig(ctx: Ctx): Promise<Config> {
     if (l.success) configuredLib = l.data.dir;
     else file.problems.push({ level: 'error', code: 'config/invalid-entry', file: path, message: `${path}: invalid "library" section (${l.error.issues.map((i) => i.message).join('; ')})` });
   }
+  file.problems.push(...relativeLibraryProblems(ctx, path, configuredLib));
   return { path, exists: true, registries: file.registries, problems: file.problems, libraryDir: libraryDir(ctx, configuredLib) };
 }
+
+/** A relative library path would land wherever the process happens to run: rejected, the default is used. */
+const relativeLibraryProblems = (ctx: Ctx, path: string, configured?: string): Problem[] =>
+  relativeLibraryValues(ctx, configured).map(({ from, value }) => ({
+    level: 'error', code: 'config/invalid-entry', file: path,
+    message: `${from} ${JSON.stringify(value)} is not an absolute path; using the default library ${libraryDir({ ...ctx, env: {} })}`,
+  }));
