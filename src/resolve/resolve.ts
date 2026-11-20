@@ -2,6 +2,7 @@ import { parseRegistriesFile } from '../config/load.js';
 import type { Ctx } from '../context.js';
 import { readGithubFile, type FetchOpts } from '../sources/github.js';
 import { fetchHttpText } from '../sources/http.js';
+import { normUrl } from '../library/layout.js';
 import type { Config, IncludeEntry, Problem, RegistriesFile, RegistryEntry, SourceEntry } from '../types.js';
 
 export interface ResolvedRegistry { name: string; entry: SourceEntry; via: string[]; trusted: boolean /* true iff declared directly in local config */ }
@@ -21,9 +22,6 @@ const isInclude = (e: RegistryEntry): e is IncludeEntry => e.type === 'github-re
 /** Auth that names an environment variable: allowed only in the local config. */
 const usesEnvAuth = (e: RegistryEntry): boolean =>
   e.auth.type === 'github_token' || e.auth.type === 'bearer' || e.auth.type === 'basic';
-
-/** Normalised URL (scheme/host case, default port, dot segments); the raw string when it doesn't parse. */
-const normUrl = (u: string): string => { try { return new URL(u).href; } catch { return u; } };
 
 /**
  * Identity of the file an include points at, for loop detection and memoisation. GitHub owner/repo are

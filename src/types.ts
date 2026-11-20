@@ -34,4 +34,4 @@ export interface RegistriesFile {
   problems: Problem[];
 }
 export interface CacheSettings { enabled: boolean; ttlSeconds: number; dir: string /* absolute */ }
-export interface Config extends RegistriesFile { path: string; exists: boolean; cache: CacheSettings }
+export interface Config extends RegistriesFile { path: string; exists: boolean; cache: CacheSettings; libraryDir: string /* absolute */ }

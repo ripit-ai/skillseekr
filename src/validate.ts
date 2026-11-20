@@ -3,7 +3,7 @@ import { basename, extname, join } from 'node:path';
 import { parseFrontmatter } from './catalog/frontmatter.js';
 import { parseRegistriesFile } from './config/load.js';
 import type { Ctx } from './context.js';
-import { defaultCacheDir } from './paths.js';
+import { defaultCacheDir, libraryDir } from './paths.js';
 import { resolve } from './resolve/resolve.js';
 import type { Config, Problem, RegistryEntry } from './types.js';
 
@@ -60,7 +60,7 @@ async function validateRegistriesFile(file: string, ctx: Ctx): Promise<Problem[]
 
   const config: Config = {
     path: file, exists: true, registries: kept, problems: [],
-    cache: { enabled: true, ttlSeconds: 3600, dir: defaultCacheDir(ctx) },
+    cache: { enabled: true, ttlSeconds: 3600, dir: defaultCacheDir(ctx) }, libraryDir: libraryDir(ctx),
   };
   // An empty env as a second guard: nothing resolved here may read the caller's environment.
   const res = await resolve(config, { force: false }, { ...ctx, env: {} });

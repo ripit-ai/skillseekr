@@ -3,7 +3,7 @@ import { parseTree, getNodeValue, printParseErrorCode, type Node, type ParseErro
 import { z } from 'zod';
 import type { Auth, Config, Problem, RegistriesFile, RegistryEntry } from '../types.js';
 import type { Ctx } from '../context.js';
-import { configPath, defaultCacheDir, expandHome } from '../paths.js';
+import { configPath, defaultCacheDir, expandHome, libraryDir } from '../paths.js';
 
 const authSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('none') }),
@@ -39,6 +39,8 @@ const cacheSchema = z.object({
   ttl_seconds: z.number().nonnegative().default(3600),
   dir: z.string().optional(),
 });
+
+const librarySchema = z.object({ dir: z.string().min(1).optional() });
 
 function lineOf(text: string, offset: number): string {
   const before = text.slice(0, offset);
@@ -118,7 +120,7 @@ export async function loadConfig(ctx: Ctx): Promise<Config> {
     const err = e as NodeJS.ErrnoException;
     const missing = err.code === 'ENOENT' || err.code === 'ENOTDIR';
     return {
-      path, exists: false, registries: [], cache: defaults,
+      path, exists: false, registries: [], cache: defaults, libraryDir: libraryDir(ctx),
       problems: [{
         level: 'error', code: missing ? 'config/missing' : 'config/unreadable', file: path,
         message: missing ? `Config file not found: ${path} (run \`skillseekr setup\`)` : `Cannot read config ${path}: ${err.message}`,
@@ -138,5 +140,12 @@ export async function loadConfig(ctx: Ctx): Promise<Config> {
       file.problems.push({ level: 'error', code: 'config/invalid-entry', file: path, message: `${path}: invalid "cache" section (${c.error.issues.map((i) => i.message).join('; ')})` });
     }
   }
-  return { path, exists: true, registries: file.registries, problems: file.problems, cache };
+  let configuredLib: string | undefined;
+  const libNode = root && root.type === 'object' ? child(root, 'library') : undefined;
+  if (libNode) {
+    const l = librarySchema.safeParse(getNodeValue(libNode));
+    if (l.success) configuredLib = l.data.dir;
+    else file.problems.push({ level: 'error', code: 'config/invalid-entry', file: path, message: `${path}: invalid "library" section (${l.error.issues.map((i) => i.message).join('; ')})` });
+  }
+  return { path, exists: true, registries: file.registries, problems: file.problems, cache, libraryDir: libraryDir(ctx, configuredLib) };
 }

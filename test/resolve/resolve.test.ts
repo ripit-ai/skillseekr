@@ -41,7 +41,7 @@ async function setup(o: {
   const parsed = parseRegistriesFile(file(o.local), { file: path, isLocalConfig: true });
   const config: Config = {
     path, exists: true, ...parsed,
-    cache: { ...(o.cache ?? { enabled: true, ttlSeconds: 3600 }), dir: join(dir, 'cache') },
+    cache: { ...(o.cache ?? { enabled: true, ttlSeconds: 3600 }), dir: join(dir, 'cache') }, libraryDir: join(dir, 'library'),
   };
   return { config, ctx, github, web };
 }

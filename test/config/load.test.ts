@@ -159,3 +159,20 @@ describe('loadConfig', () => {
     expect(cfg.registries.map(([n]) => n)).toEqual(['a']);
   });
 });
+
+describe('loadConfig library.dir', () => {
+  const withConfig = (text?: string) => {
+    const dir = mkdtempSync(join(tmpdir(), 'skillseekr-lib-'));
+    const p = join(dir, 'c.jsonc');
+    if (text !== undefined) writeFileSync(p, text);
+    return p;
+  };
+  it('reads library.dir, expanding ~', async () => {
+    const p = withConfig('{ "library": { "dir": "~/mylib" }, "registries": {} }');
+    expect((await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }))).libraryDir).toBe('/home/u/mylib');
+  });
+  it('defaults with no config file', async () => {
+    const p = withConfig();
+    expect((await loadConfig(mkCtx({ SKILLSEEKR_CONFIG: p }))).libraryDir).toBe('/home/u/.skillseekr/library');
+  });
+});

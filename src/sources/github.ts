@@ -49,7 +49,7 @@ function invalidRepo(o: Repo): Problem | undefined {
 }
 
 /** Repo-relative POSIX path split into segments, or undefined when it is empty, absolute or escapes. */
-function safeSegments(path: string): string[] | undefined {
+export function safeSegments(path: string): string[] | undefined {
   if (!path || path.includes('\0') || path.includes('\\')) return undefined;
   if (posix.isAbsolute(path) || win32.isAbsolute(path) || /^[A-Za-z]:/.test(path)) return undefined;
   const segs = path.split('/');
