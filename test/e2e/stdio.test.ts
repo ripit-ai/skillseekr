@@ -69,6 +69,7 @@ describe('stdio end to end (built binary)', () => {
       await client.connect(transport);
       const { tools } = await client.listTools();
       expect(tools.map((t) => t.name)).toContain('search_skills');
+      expect(tools.map((t) => t.name)).toContain('update_skills');
 
       const search = await call('search_skills', { query: 'fill pdf forms' });
       expect(search.isError).toBe(false);

@@ -21,7 +21,7 @@ const gh = (repo: string) => ({ type: 'github', owner: 'o', repo, skills_dir: 's
 const closers: Array<() => Promise<void>> = [];
 afterEach(async () => { while (closers.length) await closers.pop()!(); });
 
-async function setup(opts: { repos?: FakeSpec; registries?: Record<string, unknown>; roots?: string[] | 'none'; hangRoots?: boolean; engine?: Engine } = {}) {
+async function setup(opts: { repos?: FakeSpec; registries?: Record<string, unknown>; roots?: string[] | 'none'; hangRoots?: boolean; engine?: Engine; noPull?: boolean } = {}) {
   const dir = await tmpDir();
   const github = fakeGithub(opts.repos ?? {});
   const http: Http = { get: (url, h, o) => github.http.get(url, h, o) };
@@ -33,7 +33,7 @@ async function setup(opts: { repos?: FakeSpec; registries?: Record<string, unkno
     env: { SKILLSEEKR_CONFIG: path }, home: join(dir, 'home'), cwd: join(dir, 'cwd'), http,
     exec: async () => ({ code: 1, stdout: '', stderr: '' }), now: () => 1_700_000_000_000, githubApi: API,
   };
-  if (opts.registries) await pull(ctx);
+  if (opts.registries && !opts.noPull) await pull(ctx);
   const server = createMcpServer(opts.engine ?? createEngine(ctx), ctx, { rootsTimeoutMs: 100 });
   const withRoots = opts.roots !== 'none';
   const client = new Client({ name: 't', version: '0' }, { capabilities: withRoots ? { roots: {} } : {} });
@@ -68,11 +68,47 @@ const fixture = (): { repos: FakeSpec; registries: Record<string, unknown> } => 
 });
 
 describe('mcp server', () => {
-  it('listTools returns exactly the six tool names', async () => {
+  it('listTools includes update_skills with the exact description', async () => {
+    const s = await setup(fixture());
+    const { tools } = await s.client.listTools();
+    expect(tools.find((t) => t.name === 'update_skills')?.description).toBe(
+      'Update the skill library from the registries and refresh installed skills. Only call this when the user asks for an update or agrees when you offer one.');
+    expect(s.client.getInstructions()).toContain('Only call update_skills when the user asks for an update or agrees when you offer one.');
+  });
+
+  it('library-empty gates the catalog tools; update_skills fills it', async () => {
+    const f = { repos: { 'o/a': { refs: { main: SHA }, commits: { [SHA]: { 'skills/a/SKILL.md': skill('a') } } } } as FakeSpec, registries: { a: gh('a') } };
+    const s = await setup({ ...f, noPull: true });
+    for (const [name, args] of [['search_skills', { query: 'a' }], ['get_skill', { skill: 'a' }], ['read_skill_file', { skill: 'a', path: 'x' }],
+      ['install_skill', { skill: 'a' }], ['list_installed', {}]] as const) {
+      const r = await s.call(name, args);
+      expect(r.isError, name).toBe(true);
+      expect(r.data.error).toBe('library-empty');
+    }
+    const u = await s.call('update_skills');
+    expect(u.isError).toBe(false);
+    expect(u.data.changes).toContainEqual(expect.objectContaining({ id: 'a', change: 'added' }));
+    const r = await s.call('search_skills', { query: 'helps' });
+    expect(r.isError).toBe(false);
+    expect(r.data.results.map((x: any) => x.id)).toContain('a');
+  });
+
+  it('a running server sees a library updated by another process', async () => {
+    const f = { repos: { 'o/a': { refs: { main: SHA }, commits: { [SHA]: { 'skills/a/SKILL.md': skill('a') } } } } as FakeSpec, registries: { a: gh('a') } };
+    const s = await setup(f);
+    const SHA2 = 'b'.repeat(40);
+    const github = fakeGithub({ 'o/a': { refs: { main: SHA2 }, commits: { [SHA2]: { 'skills/a/SKILL.md': skill('a'), 'skills/zeta/SKILL.md': skill('zeta') } } } });
+    const { runUpdate } = await import('../../src/library/update.js');
+    await runUpdate({ ...s.ctx, http: github.http }, { force: false, installs: false, projectDir: s.project });
+    const r = await s.call('search_skills', { query: 'zeta' });
+    expect(r.data.results.map((x: any) => x.id)).toContain('zeta');
+  });
+
+  it('listTools returns exactly the seven tool names', async () => {
     const s = await setup(fixture());
     const { tools } = await s.client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ['get_skill', 'install_skill', 'list_installed', 'list_registries', 'read_skill_file', 'search_skills']);
+      ['get_skill', 'install_skill', 'list_installed', 'list_registries', 'read_skill_file', 'search_skills', 'update_skills']);
     expect(s.client.getServerVersion()?.name).toBe('skillseekr');
     expect(s.client.getInstructions()).toMatch(/^Use skillseekr to find organization skills/);
   });
@@ -202,9 +238,8 @@ describe('mcp server', () => {
   it('config problems surface as problems, not crashes', async () => {
     const s = await setup({});
     const r = await s.call('search_skills', { query: 'anything' });
-    expect(r.isError).toBe(false);
-    expect(r.data.results).toEqual([]);
-    expect(r.data.problems.map((p: { code: string }) => p.code)).toContain('config/missing');
+    expect(r.isError).toBe(true);
+    expect(r.data.error).toBe('library-empty');
   });
 
   it('a roots handler that never answers times out and falls back to ctx.cwd', async () => {
