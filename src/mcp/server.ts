@@ -157,10 +157,13 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
     });
 
   tool('update_skills', 'Update the skill library from the registries and refresh installed skills. Only call this when the user asks for an update or agrees when you offer one.',
-    { skill: z.string().optional(), force: z.boolean().optional() },
-    async ({ skill, force }) => {
-      const report = await runUpdate(ctx, { ...(skill !== undefined && { name: skill }), force: force ?? false, installs: true, projectDir: await projectDir() });
-      return report.aborted ? fail(report) : ok(report);
+    { skill: z.string().optional() },
+    async ({ skill }) => {
+      // Never forces: overwriting locally edited installs is left to the user's own 'skillseekr update --force'.
+      const report = await runUpdate(ctx, { ...(skill !== undefined && { name: skill }), force: false, installs: true, projectDir: await projectDir() });
+      if (report.aborted) return fail(report);
+      const skipped = report.installs.some((i) => i.result === 'skipped-modified');
+      return ok(skipped ? { ...report, hint: "some installs were edited locally and were not updated; the user can run 'skillseekr update --force' to overwrite them" } : report);
     });
 
   return server;

@@ -195,6 +195,20 @@ describe('mcp server', () => {
     }]);
   });
 
+  it('update_skills has no force input and leaves a locally modified install alone, with a hint', async () => {
+    const s = await setup(fixture());
+    const { tools } = await s.client.listTools();
+    expect(Object.keys(tools.find((t) => t.name === 'update_skills')!.inputSchema.properties ?? {})).toEqual(['skill']);
+    await s.call('install_skill', { skill: 'alpha' });
+    const file = join(s.project, '.claude', 'skills', 'alpha', 'SKILL.md');
+    await writeFile(file, 'LOCAL EDIT');
+    const r = await s.call('update_skills', { force: true });
+    expect(r.isError).toBe(false);
+    expect(r.data.installs).toContainEqual(expect.objectContaining({ name: 'alpha', result: 'skipped-modified' }));
+    expect(r.data.hint).toContain("'skillseekr update --force'");
+    expect(await readFile(file, 'utf8')).toBe('LOCAL EDIT');
+  });
+
   it('install_skill falls back to ctx.cwd without roots, and InstallError is isError', async () => {
     const s = await setup({ ...fixture(), roots: 'none' });
     await mkdir(s.ctx.cwd, { recursive: true });
