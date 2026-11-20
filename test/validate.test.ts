@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Ctx } from '../src/context.js';
 import { validatePath } from '../src/validate.js';
@@ -74,5 +74,17 @@ describe('validatePath', () => {
     const txt = join(e.dir, 'x.txt');
     await writeFile(txt, 'x');
     expect((await validatePath(txt, e.ctx)).problems[0]).toMatchObject({ level: 'error', code: 'validate/unsupported' });
+  });
+
+  it('validating a registries file with a reachable include creates nothing under the home or cache dirs', async () => {
+    const e = await env();
+    const home = join(e.dir, 'home');
+    await mkdir(home);
+    const reg = join(e.dir, 'ok.jsonc');
+    await writeFile(reg, JSON.stringify({ registries: { start: { type: 'github-registry', owner: 'o', repo: 'b', ref: 'main' } } }));
+    const r = (await validatePath(reg, { ...e.ctx, home })).problems;
+    expect(r.map((x) => x.code)).toContain('resolve/include-loop');
+    expect(await readdir(home)).toEqual([]);
+    expect((await readdir(e.dir)).sort()).toEqual(['home', 'ok.jsonc']);
   });
 });

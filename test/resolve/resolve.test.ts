@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { join } from 'node:path';
-import { resolve } from '../../src/resolve/resolve.js';
+import { resolve, onlineIncludeLoader, type IncludeLoader } from '../../src/resolve/resolve.js';
 import { parseRegistriesFile } from '../../src/config/load.js';
 import { resetGhTokenCache } from '../../src/auth.js';
 import type { Ctx, Exec } from '../../src/context.js';
@@ -54,7 +54,7 @@ describe('resolve', () => {
       local: { A: ghInclude('a'), z: gh('z') },
       repos: { 'o/a': repoWith({ x: gh('x'), y: gh('y') }) },
     });
-    const r = await resolve(config, { force: false }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(r.problems).toEqual([]);
     expect(r.registries.map((x) => x.name)).toEqual(['x', 'y', 'z']);
     expect(r.registries[0]).toMatchObject({ name: 'x', via: ['A', 'x'], trusted: false, entry: { repo: 'x' } });
@@ -68,7 +68,7 @@ describe('resolve', () => {
       local: { A: ghInclude('a'), shared: gh('local-shared'), after: gh('after') },
       repos: { 'o/a': repoWith({ shared: gh('remote-shared'), other: gh('other') }) },
     });
-    const r = await resolve(config, { force: false }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(r.registries.map((x) => [x.name, x.via])).toEqual([['other', ['A', 'other']], ['shared', ['shared']], ['after', ['after']]]);
     expect(r.registries[1].entry).toMatchObject({ repo: 'local-shared' });
     expect(r.overrides).toEqual([{
@@ -85,7 +85,7 @@ describe('resolve', () => {
         'o/b': repoWith({ backToA: ghInclude('a'), fromB: gh('fb') }),
       },
     });
-    const r = await resolve(config, { force: false }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(r.registries.map((x) => x.name)).toEqual(['fromB', 'fromA']);
     const loop = r.problems.filter((p) => p.code === 'resolve/include-loop');
     expect(loop).toHaveLength(1);
@@ -98,7 +98,7 @@ describe('resolve', () => {
     const repos: FakeSpec = {};
     for (let i = 1; i <= 6; i++) repos[`o/d${i}`] = repoWith({ [`s${i}`]: gh(`s${i}`), [`I${i + 1}`]: ghInclude(`d${i + 1}`) });
     const { config, ctx, github } = await setup({ local: { I1: ghInclude('d1') }, repos });
-    const r = await resolve(config, { force: false }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(r.registries.map((x) => x.name)).toEqual(['s1', 's2', 's3', 's4', 's5']);
     expect(r.registries[4].via).toEqual(['I1', 'I2', 'I3', 'I4', 'I5', 's5']);
     expect(r.problems).toEqual([expect.objectContaining({
@@ -128,7 +128,7 @@ describe('resolve', () => {
         }),
       },
     });
-    const r = await resolve(config, { force: false }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(reads).toEqual([]);
     expect(r.registries.map((x) => x.name)).toEqual(['fine']);
     const untrusted = r.problems.filter((p) => p.code === 'auth/untrusted-env-auth');
@@ -139,8 +139,8 @@ describe('resolve', () => {
     expect(github.calls.every((c) => c.includes('/o/a/'))).toBe(true);
   });
 
-  it('cache in included file is ignored; policy only set for depth-1 includes from local config', async () => {
-    const { config, ctx, github } = await setup({
+  it('policy only set for depth-1 includes from local config', async () => {
+    const { config, ctx } = await setup({
       local: { A: ghInclude('a', { policy: true }), C: ghInclude('c') },
       repos: {
         'o/a': repoWith({ B: ghInclude('b', { policy: true }) }, { cache: { enabled: false, ttl_seconds: 0 } }),
@@ -148,33 +148,9 @@ describe('resolve', () => {
         'o/c': repoWith({ y: gh('y') }),
       },
     });
-    const r1 = await resolve(config, { force: false }, ctx);
+    const r1 = await resolve(config, onlineIncludeLoader(ctx));
     expect(r1.problems).toEqual([]);
     expect(r1.includes.map((i) => [i.name, i.policy])).toEqual([['A', true], ['B', false], ['C', false]]);
-    // The local cache settings (TTL 3600) apply to every include: a second run within the TTL makes no requests.
-    const before = github.calls.length;
-    const r2 = await resolve(config, { force: false }, ctx);
-    expect(github.calls.length).toBe(before);
-    expect(r2.registries.map((x) => x.name)).toEqual(['x', 'y']);
-    // force re-checks.
-    await resolve(config, { force: true }, ctx);
-    expect(github.calls.length).toBeGreaterThan(before);
-  });
-
-  it('uses TTL 0 when the local cache or the include entry disables caching', async () => {
-    const { config, ctx, github } = await setup({
-      local: { A: ghInclude('a', { cache_enabled: false }), C: ghInclude('c') },
-      repos: { 'o/a': repoWith({ x: gh('x') }), 'o/c': repoWith({ y: gh('y') }) },
-    });
-    await resolve(config, { force: false }, ctx);
-    github.calls.length = 0;
-    await resolve(config, { force: false }, ctx);
-    expect(github.calls).toEqual(['/repos/o/a/commits/main']);
-
-    config.cache.enabled = false;
-    github.calls.length = 0;
-    await resolve(config, { force: false }, ctx);
-    expect(github.calls).toEqual(['/repos/o/a/commits/main', '/repos/o/c/commits/main']);
   });
 
   it('inaccessible registry is reported by name and others still load', async () => {
@@ -183,7 +159,7 @@ describe('resolve', () => {
       repos: { 'o/private': { ...repoWith({ hidden: gh('h') }), token: 'secret' } },
       routes: { 'https://x.example/r.jsonc': { body: file({ w: { type: 'http', url: 'https://x.example/W.md', skill_name: 'w' } }) } },
     });
-    const r = await resolve(config, { force: false }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(r.registries.map((x) => [x.name, x.via])).toEqual([['before', ['before']], ['w', ['web', 'w']], ['after', ['after']]]);
     const noAccess = r.problems.find((p) => p.code === 'source/no-access');
     expect(noAccess).toMatchObject({ level: 'error', registry: 'priv', via: ['priv'], file: config.path });
@@ -198,30 +174,48 @@ describe('resolve', () => {
       local: { web: { type: 'http-registry', url: 'https://x.example/r.jsonc' } },
       routes: { 'https://x.example/r.jsonc': { body: '{ "registries": { "bad": { "type": "nope" }, "ok": { "type": "http", "url": "https://x.example/O.md", "skill_name": "o" } } }' } },
     });
-    const r = await resolve(config, { force: false }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(r.registries.map((x) => x.name)).toEqual(['ok']);
     expect(r.problems).toEqual([expect.objectContaining({
       code: 'config/invalid-entry', registry: 'bad', via: ['web', 'bad'], file: 'https://x.example/r.jsonc',
     })]);
   });
 
-  it('marks the resolution stale when an include fell back to a cached copy', async () => {
-    const { config, ctx, github } = await setup({
-      local: { A: ghInclude('a') }, repos: { 'o/a': repoWith({ x: gh('x') }) },
-    });
-    await resolve(config, { force: false }, ctx);
-    github.offline(true);
-    const r = await resolve(config, { force: true }, ctx);
+  it('marks the resolution stale when the loader reports a stale include', async () => {
+    const { config } = await setup({ local: { A: ghInclude('a') } });
+    const load: IncludeLoader = async () => ({ text: file({ x: gh('x') }), sha: SHA, stale: true, problems: [] });
+    const r = await resolve(config, load);
     expect(r.stale).toBe(true);
     expect(r.includes[0]).toMatchObject({ name: 'A', stale: true, sha: SHA });
     expect(r.registries.map((x) => x.name)).toEqual(['x']);
-    expect(r.problems).toEqual([expect.objectContaining({ level: 'warning', code: 'source/stale', registry: 'A', via: ['A'], file: config.path })]);
+  });
+
+  it('calls the loader once per include target in a diamond graph, with the trust flag', async () => {
+    const { config } = await setup({ local: { H: ghInclude('hub') } });
+    const calls: Array<[string, boolean]> = [];
+    const load: IncludeLoader = async (e, trusted) => {
+      const repo = e.type === 'github-registry' ? e.repo : '';
+      calls.push([repo, trusted]);
+      const body: Entries = repo === 'hub' ? { T1: ghInclude('t'), T2: ghInclude('t') } : { x: gh('x') };
+      return { text: file(body), stale: false, problems: [] };
+    };
+    const r = await resolve(config, load);
+    expect(calls).toEqual([['hub', true], ['t', false]]);
+    expect(r.includes.map((i) => i.name)).toEqual(['H', 'T1', 'T2']);
+  });
+
+  it('a loader error becomes that problem on the include and the rest still resolves', async () => {
+    const { config } = await setup({ local: { bad: ghInclude('bad'), z: gh('z') } });
+    const load: IncludeLoader = async () => ({ error: { level: 'error', code: 'library/rejected', message: 'nope' } });
+    const r = await resolve(config, load);
+    expect(r.registries.map((x) => x.name)).toEqual(['z']);
+    expect(r.problems).toEqual([{ level: 'error', code: 'library/rejected', message: 'nope', registry: 'bad', via: ['bad'], file: config.path }]);
   });
 
   it('passes config problems through', async () => {
     const { config, ctx } = await setup({ local: { z: gh('z') } });
     config.problems.push({ level: 'error', code: 'config/invalid-entry', message: 'bad', file: config.path });
-    const r = await resolve(config, { force: false }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(r.problems).toEqual([{ level: 'error', code: 'config/invalid-entry', message: 'bad', file: config.path }]);
   });
 
@@ -233,7 +227,7 @@ describe('resolve', () => {
         c: gh('c', { ref: 'v1.0', cache_enabled: false }),
       },
     });
-    const r = await resolve(config, { force: false }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(r.registries).toEqual(config.registries.map(([name, entry]) => ({ name, entry, via: [name], trusted: true })));
     expect(r).toMatchObject({ includes: [], overrides: [], problems: [], stale: false });
     expect(github.calls).toEqual([]);
@@ -246,7 +240,7 @@ describe('resolve', () => {
       repos: { 'o/a': repoWith({ upper: { type: 'github-registry', owner: 'O', repo: 'A', ref: 'main' }, fromA: gh('fa') }) },
       routes: { 'https://x.example/r.jsonc': { body: file({ again: { type: 'http-registry', url: 'HTTPS://X.EXAMPLE:443/./r.jsonc' }, w: gh('w') }) } },
     });
-    const r = await resolve(config, { force: false }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(r.registries.map((x) => x.name)).toEqual(['fromA', 'w']);
     expect(r.problems.map((p) => [p.code, p.registry, p.via])).toEqual([
       ['resolve/include-loop', 'upper', ['A', 'upper']],
@@ -255,7 +249,7 @@ describe('resolve', () => {
     expect(web.calls).toHaveLength(1);
   });
 
-  it('fetches a repeated include target once per resolve, even with force', async () => {
+  it('fetches a repeated include target once per resolve', async () => {
     const { config, ctx, github } = await setup({
       local: { H: ghInclude('hub') },
       repos: {
@@ -263,7 +257,7 @@ describe('resolve', () => {
         'o/t': repoWith({ x: gh('x') }),
       },
     });
-    const r = await resolve(config, { force: true }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(github.calls.filter((c) => c.startsWith('/repos/o/t/'))).toEqual(['/repos/o/t/commits/main', `/repos/o/t/contents/registries.jsonc?ref=${SHA}`]);
     // Still walked three times for via and override bookkeeping.
     expect(r.includes.map((i) => i.via)).toEqual([['H'], ['H', 'T1'], ['H', 'T2'], ['H', 'T3']]);
@@ -280,7 +274,7 @@ describe('resolve', () => {
       local: { A: ghInclude('a') },
       repos: { 'o/a': repoWith({ gone: ghInclude('missing'), ok: gh('ok') }) },
     });
-    const r = await resolve(config, { force: false }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(r.registries.map((x) => x.name)).toEqual(['ok']);
     expect(r.problems).toEqual([expect.objectContaining({
       code: 'source/no-access', registry: 'gone', via: ['A', 'gone'], file: 'github:o/a@main:registries.jsonc',
@@ -294,7 +288,7 @@ describe('resolve', () => {
         get: (url, h, opts) => (url.startsWith('https://boom.example/') ? Promise.reject(new Error('kaboom')) : http.get(url, h, opts)),
       }),
     });
-    const r = await resolve(config, { force: false }, ctx);
+    const r = await resolve(config, onlineIncludeLoader(ctx));
     expect(r.registries.map((x) => x.name)).toEqual(['after']);
     expect(r.includes).toEqual([]);
     expect(r.problems).toEqual([expect.objectContaining({

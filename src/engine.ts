@@ -7,9 +7,9 @@ import { discoverSkills, type DiscoveredSkill } from './catalog/discover.js';
 import { loadConfig } from './config/load.js';
 import { configPath } from './paths.js';
 import { readState } from './cache/state.js';
-import { resolve, ttlFor, type IncludeInfo, type Override, type ResolvedRegistry } from './resolve/resolve.js';
-import { isShaRef, materializeGithub, type FetchOpts } from './sources/github.js';
-import { materializeHttpSkill } from './sources/http.js';
+import { resolve, ttlFor, type IncludeLoader, type IncludeInfo, type Override, type ResolvedRegistry } from './resolve/resolve.js';
+import { isShaRef, materializeGithub, readGithubFile, type FetchOpts } from './sources/github.js';
+import { fetchHttpText, materializeHttpSkill } from './sources/http.js';
 import type { CacheSettings, Config, Problem, SourceEntry } from './types.js';
 
 export interface RegistryView {
@@ -147,7 +147,11 @@ export function createEngine(ctx: Ctx, deps: EngineDeps = {}): Engine {
     const config = await loadConfig(ctx);
     const genFile = generationFile(config.cache.dir);
     const stamps: Stamps = { configFile, config: configStamp, generationFile: genFile, generation: await generationStamp(genFile) };
-    const res = await resolve(config, { force }, ctx);
+    const cachedLoader: IncludeLoader = (entry, trusted) => {
+      const fo: FetchOpts = { force, trusted, ttlSeconds: ttlFor(config, entry) };
+      return entry.type === 'github-registry' ? readGithubFile(entry, fo, config.cache, ctx) : fetchHttpText(entry, fo, config.cache, ctx);
+    };
+    const res = await resolve(config, cachedLoader);
     const results = await Promise.all(res.registries.map((r) => loadOne(r, config, force)));
 
     const problems = [...res.problems, ...results.flatMap((r) => r.problems)];

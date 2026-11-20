@@ -1,7 +1,7 @@
 import { parseRegistriesFile } from '../config/load.js';
 import type { Ctx } from '../context.js';
-import { readGithubFile, type FetchOpts } from '../sources/github.js';
-import { fetchHttpText } from '../sources/http.js';
+import { fetchGithubFile } from '../sources/github.js';
+import { fetchHttpBody } from '../sources/http.js';
 import { normUrl } from '../library/layout.js';
 import type { Config, IncludeEntry, Problem, RegistriesFile, RegistryEntry, SourceEntry } from '../types.js';
 
@@ -13,6 +13,22 @@ export interface Resolution { registries: ResolvedRegistry[]; includes: IncludeI
 /** Effective TTL for one registry: 0 (re-check every load) when caching is off globally or for the entry. */
 export const ttlFor = (config: Pick<Config, 'cache'>, entry: { cache_enabled: boolean }): number =>
   config.cache.enabled && entry.cache_enabled ? config.cache.ttlSeconds : 0;
+
+export type IncludeLoad = { text: string; sha?: string; stale: boolean; problems: Problem[] } | { error: Problem };
+/** Supplies the text of one included registries file. `trusted` is true iff the entry is declared in the local config. */
+export type IncludeLoader = (entry: IncludeEntry, trusted: boolean) => Promise<IncludeLoad>;
+
+/** Fetches each include straight from the network: no persistence, never stale. */
+export const onlineIncludeLoader = (ctx: Ctx): IncludeLoader => async (entry, trusted) => {
+  if (entry.type === 'github-registry') {
+    const r = await fetchGithubFile(entry, { trusted }, ctx);
+    return 'error' in r ? r : { text: r.text, sha: r.sha, stale: false, problems: r.problems };
+  }
+  const r = await fetchHttpBody(entry, { trusted }, ctx);
+  if ('error' in r) return r;
+  if (r.notModified) return { error: { level: 'error', code: 'source/unreachable', message: `unexpected 304 Not Modified from ${entry.url}` } };
+  return { text: r.body.toString('utf8'), stale: false, problems: r.problems };
+};
 
 /** The local config is depth 0; an include entry whose file would be deeper than this is skipped. */
 export const MAX_INCLUDE_DEPTH = 5;
@@ -37,24 +53,14 @@ const fileLabel = (e: IncludeEntry): string =>
 
 interface Level { trusted: boolean; depth: number /* of the file holding the entries */; via: string[]; file: string; seen: ReadonlySet<string> }
 
-export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx): Promise<Resolution> {
+export async function resolve(config: Config, loader: IncludeLoader): Promise<Resolution> {
   const problems: Problem[] = [...config.problems];
   const includes: IncludeInfo[] = [];
   const overrides: Override[] = [];
   const hoisted = new Map<string, ResolvedRegistry>();
   let stale = false;
 
-  type Fetched = Awaited<ReturnType<typeof readGithubFile>> | Awaited<ReturnType<typeof fetchHttpText>>;
-  type Loaded = Exclude<Fetched, { error: Problem }> & { sha?: string; parsed: RegistriesFile };
-
-  const fetchInclude = (entry: IncludeEntry, trusted: boolean): Promise<Fetched> => {
-    const fo: FetchOpts = {
-      force: opts.force, trusted, ttlSeconds: ttlFor(config, entry),
-    };
-    return entry.type === 'github-registry'
-      ? readGithubFile(entry, fo, config.cache, ctx)
-      : fetchHttpText(entry, fo, config.cache, ctx);
-  };
+  type Loaded = Exclude<IncludeLoad, { error: Problem }> & { parsed: RegistriesFile };
 
   /**
    * Fetch + parse once per include target within this call (diamond / fan-out graphs). Keyed by identity,
@@ -67,7 +73,7 @@ export async function resolve(config: Config, opts: { force: boolean }, ctx: Ctx
     if (!p) {
       p = (async () => {
         try {
-          const r = await fetchInclude(entry, trusted);
+          const r = await loader(entry, trusted);
           if ('error' in r) return r;
           return { ...r, parsed: parseRegistriesFile(r.text, { file: fileLabel(entry), isLocalConfig: false }) };
         } catch (e) {
