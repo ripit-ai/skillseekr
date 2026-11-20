@@ -2,12 +2,12 @@
 status: design
 type: feature
 created: 2026-11-14
-updated: 2026-11-14
+updated: 2026-11-19
 ---
 
 ## Summary
 
-**skillseekr** lets coding agents in **Claude Code**, **OpenCode**, and **GitHub Copilot** find and fetch [Agent Skills](https://agentskills.io) **on demand**, from any number of skill registries. People can do the same by hand with the `skillseekr` CLI.
+**skillseekr** lets coding agents in **Claude Code**, **OpenCode**, and **GitHub Copilot** find and use [Agent Skills](https://agentskills.io) from any number of skill registries, kept in a **local library that changes only when someone runs `update`**. Reads never go online; the design is in [skill-library design](superpowers/specs/2026-11-19-skill-library-design.md). People can do the same by hand with the `skillseekr` CLI.
 
 The catalog is a **list of registries** rather than one repository. Each registry is a GitHub repo of skills, a single `SKILL.md` URL, or a **registries file** (another list of registries). The config format is the one used by [afriemann/skills-mcp](https://github.com/afriemann/skills-mcp), copied exactly, plus two new registry types for including registries files. `setup` points everyone at a default organizational registries file (for ripit-ai, `ripit-ai/agent-skills`), and each person can add more. Registries files are maintained however their owners want.
 
@@ -16,14 +16,15 @@ The catalog is a **list of registries** rather than one repository. Each registr
 The catalog will grow too large to install on every machine, and most skills only matter for certain kinds of work. Bulk-installing them bloats agent context and makes skills hard to keep current. Instead:
 
 - **Agents serve themselves.** While working, an agent notices it could use a skill, searches the catalog, picks one, and uses it. Nobody has to know what exists ahead of time.
-- **Skills arrive on demand.** Nothing is present until someone needs it, and nothing stays unless someone chooses to keep it.
+- **Skills arrive on demand.** Nothing is installed into a tool until someone needs it, and nothing stays unless someone chooses to keep it. The library holds what is available; `install` copies from it.
+- **Content changes only at known times.** Registry content enters the machine only through an explicit `update` (a person, setup's confirmed update, or an agent the user asked), never through a read.
 - **Orgs share a list; individuals can extend it.** A registries file can give a whole team the same default catalog. People can add their own sources, and the tooling always shows which registry each skill came from.
 - **Point to skills instead of copying them.** Registries stay where they live. A registries file lists them instead of pulling their content into a repo.
 
 ## Goals
 
 1. A default organizational registries file (for ripit-ai, `ripit-ai/agent-skills`), written into everyone's config by `setup`, defines the default skill catalog.
-2. Agents in Claude Code, OpenCode, and Copilot (CLI and VS Code) can search the catalog, fetch a skill, and optionally install it, with no human help.
+2. Agents in Claude Code, OpenCode, and Copilot (CLI and VS Code) can search the catalog, read a skill from the library, and optionally install it, with no human help.
 3. People can search, inspect, install, update, and remove skills by hand with the `skillseekr` CLI.
 4. Individuals can add their own registries in their local config.
 5. Access is simple: anyone who can read a registries file, and the repos it lists, gets everything in it. There are no per-skill permissions.
@@ -48,6 +49,7 @@ These would count as failure even if everything technically works:
 - **A compromised update reaching a machine unchecked** *(Phase 2)*. A skill that turns malicious through an update, or that slipped past review, must be caught by the runtime scan before an agent can use it. Overrides never carry over to new content.
 - **Hidden sources.** Every skill must show which registry, and which chain of registries files, it came from, in search results and listings. Every override (a later registry replacing an earlier skill) must be reported.
 - **The bulk install coming back.** If skill folders slowly fill with everything agents ever touched, the design has failed.
+- **Implicit fetching.** Any path other than `update` (or setup's confirmed update, or `validate`) that downloads registry content: a TTL, a retry on error, a lazy fetch for a missing file.
 - **A second login.** If using skillseekr needs credentials beyond what people already have (`gh` CLI login, or an existing token env var), something has gone wrong.
 
 ## Constraints
@@ -81,7 +83,7 @@ There were three rounds of decisions.
 
 | # | Approach | Trade-offs | Decision |
 |---|---|---|---|
-| i | Fork afriemann/skills-mcp | Fetch, auth, and cache already exist, but it's a tiny Python project that lists install/sync as non-goals, so we'd own a divergent fork | Rejected |
+| i | Fork afriemann/skills-mcp | Fetch, auth, and cache already exist, but it's a tiny Python project that lists installing and syncing as non-goals, so we'd own a divergent fork | Rejected |
 | ii | **Our own Node/TS package that reads the same config format exactly** | One codebase we control. We rewrite the modest fetch/auth/cache layer, borrowing skills-mcp's design. | **Chosen** |
 | iii | Contribute upstream and build only the missing pieces | Least code, but two tools in two languages, and we'd depend on upstream accepting our PRs | Rejected |
 
@@ -103,7 +105,7 @@ flowchart LR
     subgraph Machine["Developer machine"]
         Config[~/.config/skillseekr/config.jsonc]
         Resolver[Resolver<br/>expand → hoist → dedupe]
-        Cache[(~/.cache/skillseekr<br/>per-registry trees)]
+        Library[(~/.skillseekr/library<br/>per-source trees + manifest)]
         Index[(Skill index<br/>path IDs + names)]
         MCP[skillseekr mcp]
         CLI[skillseekr CLI]
@@ -117,7 +119,7 @@ flowchart LR
     OrgList -. lists .-> Team
     Resolver -- fetch at ref --> Ext1
     Resolver -- fetch --> Personal
-    Resolver --> Cache --> Index
+    Resolver -- update only --> Library --> Index
     Index --> MCP
     Index --> CLI
     Tools <-- MCP tools --> MCP
@@ -145,12 +147,8 @@ skillseekr reads `~/.config/skillseekr/config.jsonc` (JSONC, comments allowed). 
     }
     // Personal additions go below. Anything here is resolved after the entry above,
     // so it overrides its skills or registries with the same name.
-  },
-  "cache": {
-    "enabled": true,
-    "ttl_seconds": 3600,
-    "dir": "~/.cache/skillseekr"
   }
+  // Optional: "library": { "dir": "~/.skillseekr/library" }
 }
 ```
 
@@ -180,7 +178,7 @@ Both include types accept an optional **`policy: true`** *(my call)*, which only
 
 **Auth in included files is restricted** *(my call, for security)*. A registries file reached through a `*-registry` include may only use `gh_cli` or no auth. `github_token` and `bearer`, which name an environment variable, are allowed **only in the user's own local config**. Otherwise any included list, including a third-party one someone adds for themselves, could name a variable like `AWS_SECRET_ACCESS_KEY` and send its value to whatever URL it chooses. `gh_cli` credentials are only ever sent to GitHub hosts. An included entry that breaks this rule is skipped and reported. This doesn't affect AC-5, because skills-mcp has no includes.
 
-**Cache:** branch and tag refs, and HTTP sources, are re-checked after `ttl_seconds`. A commit SHA ref never expires. Only the top-level local config's `cache` section is used. A `cache` section in an included registries file is ignored.
+**Library location:** `$SKILLSEEKR_LIBRARY`, else `library.dir` in the local config (`~` expanded), else `~/.skillseekr/library`. **Cache section:** a `cache` section, and `cache_enabled` on entries, are still accepted but ignored (skills-mcp compatibility). Only the `cache` section produces a `config/cache-ignored` warning. A commit SHA ref never changes after its first download.
 
 ### Resolution: expand, hoist, dedupe
 
@@ -241,17 +239,22 @@ A **registries file** is a JSONC file in the same format (`registries`, plus in 
 
 ## The local side
 
-### Fetching and caching
+### The skill library
 
-- `github` registries: resolve `ref` to a commit SHA through the GitHub API, then download the repo tarball for that SHA once and unpack it to `~/.cache/skillseekr/github/<owner>/<repo>/<sha>/`. The tree is kept exactly as upstream has it. *(Tarball rather than file-by-file is my call: one request per registry per SHA.)*
-- `http` registries: fetch the file and cache it with its ETag or a content hash.
-- The **index** (ID, name, description, registry, include chain, path, content hash) is built from the cache and saved per resolved config state. It's rebuilt only when a registry's SHA or content changes.
-- **Offline or failing sources:** use the last good cache and warn. Results note that the catalog may be stale. A source that has never been fetched is reported by `doctor` and skipped.
-- Fetched content is **untrusted data**. Use path-traversal checks on every file path, and never run anything as part of fetching or indexing.
+Full design: [skill-library design](superpowers/specs/2026-11-19-skill-library-design.md).
+
+- **Location and layout:** `~/.skillseekr/library` (folders `0700`, files `0600`; extracted tarball files keep their tar modes). One folder per source: `github/<owner>/<repo>@<ref>/` (the repo tree at the resolved commit), `registries/…` (included registries files), `http/<hash>/<skill_name>/SKILL.md`. `manifest.json` is written last by every update and is the catalog: the resolution (registries, includes, `via`, overrides, problems), the config hash, and per source its folder, SHA or ETag, `fetchedAt` and skill index. A missing or invalid manifest means "library empty". `.lock` is held while an update runs.
+- **Only `update` goes online.** `skillseekr update` (also setup's confirmed update, and the MCP `update_skills` tool) resolves the config, fetching include files, then stages every source in a temporary folder (github: resolve `ref` to a commit SHA and download the tarball for it, skipped when the SHA is unchanged; http: `If-None-Match`), then swaps each into place and writes the manifest. A *security hook* sits between staging and swap, a no-op for now, where a later check can reject sources or the whole update. `validate` also fetches, into a throwaway folder, and never touches the library.
+- **Partial failure is safe.** A failing source keeps its previous folder and record, marked stale with the problem. A failed manifest write rolls every swap back. One update runs at a time.
+- **Conservative pruning.** Folders of registries no longer in the config are deleted only when the resolution had no error problems. A missing or unparsable config aborts the update before anything changes.
+- **Read-only by convention.** A kept folder whose files no longer match the manifest's content hashes is downloaded again by the next update; `doctor` reports it. Reads do not re-hash.
+- **Reads are offline.** The engine builds the catalog from the manifest alone. A library with no manifest gives a `library/empty` error: `the skill library is empty; run 'skillseekr update'`. A config that changed since the last update gives a `library/config-changed` warning. A source whose last update failed is `stale`. A running MCP server reloads when the manifest changes, not when the config changes.
+- **After an update**, installed copies (user scope and the current project) that are behind are refreshed, with local edits skipped unless `--force`.
+- Fetched content is **untrusted data**. Path-traversal checks apply to every file path, and nothing is run while fetching or indexing.
 
 ### Fetching vs installing
 
-**Fetching** (the default for agents): `get_skill` returns the `SKILL.md` body, the skill's file list, and the **absolute path of the skill's folder in the cache**. Agents read the skill's other files (`references/`, `templates/`, scripts) through the **`read_skill_file`** MCP tool rather than from disk. Claude Code and Copilot ask permission before reading outside the project, and in the VS Code remote setup the cache path may not be reachable from where the agent runs. The cache path is still returned for running a skill's scripts in place. Nothing is written to any tool's skill folder.
+**Fetching** (the default for agents): `get_skill` returns the `SKILL.md` body, the skill's file list, and the **absolute path of the skill's folder in the library**. Agents read the skill's other files (`references/`, `templates/`, scripts) through the **`read_skill_file`** MCP tool rather than from disk. Claude Code and Copilot ask permission before reading outside the project, and in the VS Code remote setup the library path may not be reachable from where the agent runs. The library path is still returned for running a skill's scripts in place. Nothing is written to any tool's skill folder.
 
 **Installing**: this happens only when explicitly asked, either by an agent calling `install_skill` or a person running `skillseekr install`. Installing copies the skill's folder into a tool's skill folder as `<name>/`, using the skill's `name`, which is the last part of its ID. The tool then loads it natively from then on. Tools only load skills one level deep, so the category path isn't kept on install. If two different IDs would install under the same `name` in the same scope, the install **refuses** and names the skill already there. Renaming isn't possible, because the standard requires the folder name to match the frontmatter `name`.
 
@@ -274,19 +277,21 @@ The server runs over stdio. These are the tools agents see:
 | Tool | Input | Returns |
 |---|---|---|
 | `search_skills` | `query`, optional `limit` (default 10) | `[{id, name, description, registry, via}]`, metadata only, to keep context small |
-| `get_skill` | `skill`: a path ID, or a bare name if unique (if ambiguous, returns the matching IDs) | the `SKILL.md` body, the absolute path of the cached folder, the file list, `registry`, `via`, and anything it overrode |
-| `read_skill_file` | `skill` (ID or unique name), `path` (relative to the skill folder) | that file's contents. Paths that resolve outside the skill's folder (`..`, absolute paths, symlinks) are refused. Large or binary files return metadata and the cache path instead of contents. |
+| `get_skill` | `skill`: a path ID, or a bare name if unique (if ambiguous, returns the matching IDs) | the `SKILL.md` body, the absolute path of the folder in the library, the file list, `registry`, `via`, and anything it overrode |
+| `read_skill_file` | `skill` (ID or unique name), `path` (relative to the skill folder) | that file's contents. Paths that resolve outside the skill's folder (`..`, absolute paths, symlinks) are refused. Large or binary files return metadata and the library path instead of contents. |
 | `install_skill` | `skill` (ID or unique name), `scope` (`project` \| `user`) | the install path, plus which tools will now load it |
 | `list_installed` | optional `scope` | the installed skills, with any that are out of date flagged |
-| `list_registries` | — | the resolved, flat registry list in order, with each registry's include chain (`via`), resolved SHA, cache age, and any overrides |
+| `list_registries` | — | the resolved, flat registry list in order, with each registry's include chain (`via`), resolved SHA, `fetchedAt` (last successful fetch), and any overrides |
+| `update_skills` | optional `skill` (limits the install refresh) | Updates the library and refreshes installed skills, returning what `update --json` returns. Has **no `force`**: it never overwrites locally edited installs. When it skips edited installs the result carries a hint that the user can run `skillseekr update --force`. *(Removed `force` after a security review: an agent must not overwrite the user's local edits.)* |
 
-Agents can't **remove** skills or **change registries**. Both stay human actions through the CLI. *(My call.)*
+With no library yet, the catalog tools return a `library-empty` error naming the catalog's error problems. Consent for `update_skills` is **not enforced by the server**: the guard is the tool description, the server instructions and the client's own tool-permission prompt. Agents can't **remove** skills, **change registries** or **force** an update. Both stay human actions through the CLI. *(My call.)*
 
 The server's instructions, plus the starter skill below, tell agents to:
 1. search before starting specialized or unfamiliar work,
 2. fetch with `get_skill` and follow it, reading any supporting files it refers to with `read_skill_file`,
 3. mention which registry a skill came from when the user asks, or when it's overriding another skill, and
-4. install only when the user asks, or after asking whether to keep it.
+4. install only when the user asks, or after asking whether to keep it, and
+5. call `update_skills` only when the user asks for an update or agrees when offered.
 
 ### Starter skill
 
@@ -297,24 +302,24 @@ The server's instructions, plus the starter skill below, tell agents to:
 name: skillseekr
 description: Use at the start of any specialized task (a framework, platform, workflow, or document type) to search the organization's skill catalog for an existing skill before working from scratch.
 ---
-Call `search_skills` with a short description of the task. If a result fits, call `get_skill` and follow it. Don't install a skill unless the user asks or agrees.
+Call `search_skills` with a short description of the task. If a result fits, call `get_skill` and follow it. Don't install a skill unless the user asks or agrees. If the catalog is empty or the user asks for newer skills, offer to call update_skills; only call it if they agree.
 ```
 
 ### CLI (`skillseekr`)
 
 | Command | What it does |
 |---|---|
-| `skillseekr setup [--tools claude,opencode,copilot] [--yes]` | Writes the config if it's missing, registers the MCP server and starter skill with each tool it finds, then runs `doctor`. Safe to re-run and able to run unattended. |
+| `skillseekr setup [--tools claude,opencode,copilot] [--yes]` | Writes the config if it's missing (without a `cache` section), registers the MCP server and starter skill with each tool it finds, asks `Update the skill library now? [y/N] ` (only `y`/`yes` runs a full update; `--yes` counts as yes; with no terminal it is skipped with `skipped; run 'skillseekr update' when you're ready`; an aborted confirmed update makes setup exit 1), then runs `doctor`. Safe to re-run and able to run unattended. |
 | `skillseekr search <query>` | Searches the resolved catalog (same engine as the MCP tool). |
 | `skillseekr show <id\|name>` | Prints the metadata, registry, include chain (`via`), overrides, file list, and `SKILL.md`. |
 | `skillseekr install <id\|name> [--user]` | Installs to the project (default) or user scope. |
 | `skillseekr remove <name> [--user]` | Removes an installed skill folder. Only works on folders with a skillseekr marker. |
 | `skillseekr list [--user]` | Lists installed skills and whether each is out of date. |
-| `skillseekr outdated` / `skillseekr update [name] [--force]` | Compares installs with the catalog and updates them. |
+| `skillseekr outdated` | Lists installs that are not current. |
+| `skillseekr update [name] [--force] [--no-installs]` | Pulls every registry into the library, then refreshes user and project installs that are behind (`name` limits the refresh). Prints the summary, the added/changed/removed skills and install results. Exit 1 on any error problem, aborted pull or failed install. There is no `--user`. |
 | `skillseekr registries` | Shows the resolved registry list (same as `list_registries`). |
-| `skillseekr registries add <name> …` / `remove <name>` | Edits the local config's personal registries. Writes JSONC without losing comments. |
-| `skillseekr sync` | Ignores the TTL, re-resolves everything, and rebuilds the index. |
-| `skillseekr doctor` | Checks the config parse, auth for each registry, sources that can't be reached, include loops, overrides, MCP registration per tool, and skill folder paths. |
+| `skillseekr registries add <name> …` / `remove <name>` | Edits the local config's personal registries. Writes JSONC without losing comments, and prints `run 'skillseekr update' to apply`. |
+| `skillseekr doctor` | Offline. Checks the config parse (and an ignored `cache` section), the library (path, last update, empty, config changed, edited folders, a lock left by a dead process), auth for each registry, sources whose last update failed, include loops, overrides, MCP registration per tool, and skill folder paths. |
 | `skillseekr mcp` | Starts the MCP server (called by the tools, not by people). |
 | `skillseekr scan [dir…] [--gate …]` | *Phase 2.* Read-only security scan of any folder, or by default every tool and plugin skill folder. |
 | `skillseekr allow <id>` / `--list` / `--prune` | *Phase 2.* Adds a local override tied to the skill's exact content and the named rules (requires typed confirmation), lists overrides, or removes stale ones. |
@@ -331,7 +336,7 @@ Call `search_skills` with a short description of the task. If a result fits, cal
 | **Copilot CLI** | Add to `~/.copilot/mcp-config.json` | `~/.copilot/skills/skillseekr/` |
 | **Copilot in VS Code** | Add to the user-profile `mcp.json` | Same as Copilot CLI, if VS Code reads it. Otherwise the builder finds the equivalent. |
 
-**Where it runs** *(my call)*: skillseekr is installed and set up separately on each machine where agents run. That might be a Mac directly, the Lima VM, or both, and each has its own config and cache. When VS Code on the Mac is connected to the VM (`scode`), agents run on the VM side. So `setup` in the VM registers the MCP server in VS Code's **remote** user settings on the VM, not in the Mac's profile, which the VM can't write to. The builder must confirm where VS Code's remote MCP config lives. If remote user-level MCP config isn't supported, `setup` can write a workspace `.vscode/mcp.json` instead, when asked to.
+**Where it runs** *(my call)*: skillseekr is installed and set up separately on each machine where agents run. That might be a Mac directly, the Lima VM, or both, and each has its own config and library. When VS Code on the Mac is connected to the VM (`scode`), agents run on the VM side. So `setup` in the VM registers the MCP server in VS Code's **remote** user settings on the VM, not in the Mac's profile, which the VM can't write to. The builder must confirm where VS Code's remote MCP config lives. If remote user-level MCP config isn't supported, `setup` can write a workspace `.vscode/mcp.json` instead, when asked to.
 
 `setup` must merge into existing config files, never overwrite them. It should show a diff, or keep a backup, of each file it changes. Running it twice must change nothing the second time. That lets the Lima sandbox's `sandbox.yml` install skillseekr and run `skillseekr setup --yes` on every boot, restoring the parts a VM recreate wipes.
 
@@ -344,15 +349,14 @@ sequenceDiagram
     participant U as Developer
     participant A as Agent (any tool)
     participant M as skillseekr mcp
-    participant C as Cache / index
+    participant C as Library (manifest)
     participant G as GitHub
     U->>A: "Add a deploy stage for our Terraform"
     A->>M: search_skills("terraform azure devops pipeline")
-    M->>C: index fresh? (TTL / SHA)
-    C->>G: (if stale) resolve refs, fetch changed trees
+    M->>C: read the manifest (no network)
     M-->>A: [devops/terraform-azure-pipeline (registry: ripit-ai), …]
     A->>M: get_skill("devops/terraform-azure-pipeline")
-    M-->>A: SKILL.md + ~/.cache/skillseekr/github/ripit-ai/agent-skills/<sha>/skills/…/
+    M-->>A: SKILL.md + ~/.skillseekr/library/github/ripit-ai/agent-skills@main/skills/…/
     A->>A: does the work following the skill
     A->>U: "Done. Want me to keep this skill for the project?"
     U->>A: yes
@@ -362,12 +366,13 @@ sequenceDiagram
 
 **Personal source:** run `skillseekr registries add …`, or edit the local config. Its skills show up labelled with that registry, and anything they override is reported.
 
-**Registries file changes:** however a file's owners change it, everyone's tooling picks the change up within the cache TTL, or straight away with `skillseekr sync`.
+**Registries file changes:** however a file's owners change it, everyone's tooling picks the change up at their next `skillseekr update`; until then they keep the library they have.
 
 ## Security notes
 
 - Skills are prompts, and they can include scripts the agent will run. skillseekr treats every fetched skill as untrusted, whatever its source.
-- A registry pinned to a commit SHA can't change under that pin. Its fetched tree is cached and never re-fetched. Whether sources are pinned is up to whoever writes the registries file.
+- New content enters only at `update`, a controlled point where a later security check can run between "downloaded" and "live". An agent can request an update only through `update_skills`, which cannot overwrite local edits to installs.
+- A registry pinned to a commit SHA can't change under that pin. Its tree is downloaded once and never re-fetched. Whether sources are pinned is up to whoever writes the registries file.
 - Every registry a person adds is their choice and their risk. Every skill is labelled with where it came from, and every override is reported.
 - Tokens are never written to config. Only env var names are, or `gh_cli` is used.
 - Fetched content is untrusted data. Fetching and indexing never run anything, and all paths are checked for traversal.
@@ -380,14 +385,15 @@ sequenceDiagram
 - [ ] **AC-3:** An agent, without being told the skill's name, finds and uses a relevant skill for a task that matches its description. *Measured by (my call):* a set of 10 realistic task prompts, each with a matching skill in the default registries, run in Claude Code, OpenCode, and Copilot CLI with their default models. Each tool must call `search_skills` and fetch the right skill in at least 8 of the 10.
 - [ ] **AC-4:** `get_skill` writes nothing into any tool's skill folder. Only `install_skill` and `skillseekr install` do.
 - [ ] **AC-4b:** `read_skill_file` returns any file inside a fetched skill's folder without the agent needing permission to read outside the project. It refuses any path that resolves outside the skill's folder.
-- [ ] **AC-5:** A config file that skills-mcp accepts (using only `github` and `http`) means the same thing to skillseekr: the same registries, refs, auth, and cache behaviour.
+- [ ] **AC-5:** A config file that skills-mcp accepts (using only `github` and `http`) means the same thing to skillseekr: the same registries, refs and auth. (`cache` settings are accepted and ignored.)
 - [ ] **AC-6:** `github-registry` and `http-registry` includes expand depth-first in file order. Registry-name and skill-ID collisions follow "last wins". Skill IDs match what skills-mcp's `list_skills` would return for the same registry. A unique bare name resolves through `get_skill`, and an ambiguous one returns the candidate IDs. Loops are detected. Every override shows in `doctor`, `list_registries`, and search results.
 - [ ] **AC-7:** Every skill shows its `registry` and `via` everywhere it appears. A skill from a later registry with the same ID as an earlier one replaces it and is reported as an override.
 - [ ] **AC-8:** `policy: true` only has an effect on entries in the local config. `policy` in included files is ignored. skillseekr applies no curation rules (pinning, review) to any registries file beyond what this spec defines.
 - [ ] **AC-8b:** An included registries file that uses `github_token` or `bearer` auth has that entry skipped and reported. No environment variable named by an included file is ever read.
 - [ ] **AC-9:** A project-scope install is picked up by all three tools from `.claude/skills/<name>/` and contains a `.skillseekr.json` marker. `remove`, `list`, `outdated`, and `update` work for both scopes. `update` refuses to overwrite local edits without `--force`. Folders without a marker are never touched.
 - [ ] **AC-10:** Running `skillseekr setup --yes` twice in a row changes nothing the second time.
-- [ ] **AC-11:** With the network off, search and fetch still work from the cache, and results say the catalog may be stale.
+- [ ] **AC-11:** With the network off, search and fetch still work from the library, and a source whose last update failed is flagged stale.
+- [ ] **AC-12:** Only `update` (including setup's confirmed update and `update_skills`) and `validate` make network requests. A failed or interrupted update never leaves a source half-written or deletes a good copy.
 
 ## Open questions
 

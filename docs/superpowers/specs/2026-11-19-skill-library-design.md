@@ -137,7 +137,7 @@ Output: a summary line (`updated N registries: X skills added, Y changed, Z remo
 
 ### MCP tool `update_skills`
 
-- Input: optional `skill` (limits the install refresh, like `update [name]`) and optional `force`.
+- Input: optional `skill` (limits the install refresh, like `update [name]`). There is **no `force` input** *(changed after a security review: an agent must not be able to overwrite the user's local edits to installs)*. The tool never forces; when it skips locally edited installs, its result includes a `hint` that the user can run `skillseekr update --force`.
 - Description: "Update the skill library from the registries and refresh installed skills. Only call this when the user asks for an update or agrees when you offer one." The server `INSTRUCTIONS` gain the same rule.
 - Runs the same code as the CLI command, using the project folder from MCP roots. It returns the same JSON as `update --json`. After it runs, the server's own catalog reloads from the new manifest.
 - Consent is **not enforced by the server** (owner's decision). The guard is the tool description, `INSTRUCTIONS`, and each client's own tool-permission prompt. There is no MCP elicitation step.
