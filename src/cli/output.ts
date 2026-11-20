@@ -53,6 +53,7 @@ export function reportProblems(io: Io, problems: Problem[], stale: boolean): voi
 export async function blockingError(cli: Cli, problems: Problem[], skillTotal: number): Promise<CliError | undefined> {
   if (skillTotal > 0) return undefined;
   const errs = errorProblems(problems);
+  if (errs.some((p) => p.code === 'library/empty')) return new CliError("the skill library is empty; run 'skillseekr update'", 2);
   if (errs.some((p) => p.code.startsWith('config/'))) {
     return new CliError('the configuration prevents loading any skills (see the problems above)', 2);
   }

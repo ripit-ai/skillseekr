@@ -171,7 +171,7 @@ describe('cli', () => {
     expect(await readFile(join(s.cwd, '.claude', 'skills', 'dup', 'SKILL.md'), 'utf8')).toContain('dup helps');
     const j = await s.run('--json', 'update', '--force');
     expect(j.code).toBe(1);
-    expect(JSON.parse(j.out).results.find((x: { name: string }) => x.name === 'alpha')).toMatchObject({ result: 'failed', message: 'disk on fire' });
+    expect(JSON.parse(j.out).installs.find((x: { name: string }) => x.name === 'alpha')).toMatchObject({ result: 'failed', message: 'disk on fire' });
   });
 
   it('update skips modified without --force', async () => {
@@ -318,6 +318,72 @@ describe('cli', () => {
     expect(r.code).toBe(0);
     expect(r.out).toMatch(/dup\s+missing-from-catalog/);
     expect(r.err).toContain('hint:');
+  });
+
+  it('update on an empty library pulls it and lists the changes; search before it exits 2', async () => {
+    const s = await setup();
+    await writeFile(s.path, s.config({ r: gh('one') }));
+    const before = await s.run('search', 'alpha');
+    expect(before.code).toBe(2);
+    expect(before.err).toContain("the skill library is empty; run 'skillseekr update'");
+    const r = await s.run('update');
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('updated 1 registries: 2 skills added, 0 changed, 0 removed');
+    expect(r.out).toContain('  + alpha (r)');
+    // The memoized engine sees the new manifest.
+    expect((await s.run('search', 'alpha')).code).toBe(0);
+  });
+
+  it('update --json prints an UpdateReport', async () => {
+    const s = await setup();
+    await writeFile(s.path, s.config({ r: gh('one') }));
+    const r = await s.run('--json', 'update');
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ aborted: false, registries: 1, skills: 2, installs: [], problems: [], stale: false });
+  });
+
+  it('update exits 1 naming the path when the library cannot be written', async () => {
+    if (process.getuid?.() === 0) return;
+    const s = await setup();
+    await writeFile(s.path, s.config({ r: gh('one') }));
+    const parent = join(s.dir, 'ro');
+    await mkdir(parent);
+    const lib = join(parent, 'library');
+    await writeFile(s.path, JSON.stringify({ library: { dir: lib }, registries: { r: gh('one') } }));
+    await chmod(parent, 0o500);
+    try {
+      const r = await s.run('update');
+      expect(r.code).toBe(1);
+      expect(r.err).toContain(lib);
+    } finally { await chmod(parent, 0o700); }
+  });
+
+  it('update --user is a usage error; --no-installs leaves installs alone', async () => {
+    const s = await setup({ registries: { one: gh('one') } });
+    expect((await s.run('update', '--user')).code).toBe(1);
+    await s.run('install', 'alpha');
+    const file = join(s.cwd, '.claude', 'skills', 'alpha', 'SKILL.md');
+    await writeFile(file, 'local edit');
+    const r = await s.run('update', '--no-installs', '--force');
+    expect(r.code).toBe(0);
+    expect(await readFile(file, 'utf8')).toBe('local edit');
+  });
+
+  it('registries add and remove print the update hint', async () => {
+    const s = await setup();
+    const add = await s.run('registries', 'add', 'x', '--type', 'http-registry', '--url', 'https://x');
+    expect(add.out).toContain("run 'skillseekr update' to apply");
+    const rm = await s.run('registries', 'remove', 'x');
+    expect(rm.out).toContain("run 'skillseekr update' to apply");
+  });
+
+  it('read commands against a pulled library never touch the network', async () => {
+    const s = await setup({ registries: { one: gh('one') } });
+    s.ctx.http = { get: async () => { throw new Error('network used'); } };
+    for (const argv of [['search', 'alpha'], ['show', 'alpha'], ['install', 'alpha'], ['list'], ['outdated'], ['registries'], ['doctor']]) {
+      const r = await s.run(...argv);
+      expect(r.code, `${argv.join(' ')}: ${r.err}`).toBe(0);
+    }
   });
 
   it('registries add/remove follow a symlinked config and keep its mode', async () => {
