@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import type { Ctx } from './context.js';
 import type { Engine } from './engine.js';
 import { listInstalled } from './install/installer.js';
+import { readLock } from './library/lock.js';
+import { verifyFolders } from './library/verify.js';
 import { TOOL_TARGETS, presentTools } from './install/targets.js';
 import { allRegistrars, starterDir, STARTER_NAME } from './setup/setup.js';
 import type { Auth, Problem } from './types.js';
@@ -30,9 +32,31 @@ export async function doctor(engine: Engine, ctx: Ctx, opts: { vscodeWorkspace?:
   if (configProblems.length > 0) add('config', 'fail', configProblems.map((p) => p.message).join('; '));
   else add('config', 'ok', `${config.path}: ${config.registries.length} top-level ${config.registries.length === 1 ? 'entry' : 'entries'}`);
 
+  if (config.problems.some((p) => p.code === 'config/cache-ignored')) {
+    add('config:cache', 'warn', config.problems.filter((p) => p.code === 'config/cache-ignored').map((p) => p.message).join('; '));
+  }
+
   const catalog = await engine.catalog();
   const { registries: views, includes, problems } = await engine.registries();
   const forName = (name: string) => problems.filter((p) => p.registry === name);
+
+  // The library: offline checks only (the manifest, a lock file, a re-hash of the folders).
+  const lib = await engine.library();
+  if (!lib.manifest) add('library', 'warn', "the skill library is empty; run 'skillseekr update'");
+  else {
+    const n = lib.manifest.sources.reduce((t, s) => t + s.skills.length, 0);
+    add('library', 'ok', `${lib.dir}: updated ${lib.manifest.updatedAt}, ${n} skills`);
+    const changed = problems.find((p) => p.code === 'library/config-changed');
+    if (changed) add('library:config', 'warn', changed.message);
+    try {
+      const edited = await verifyFolders(lib.dir, lib.manifest);
+      if (edited.length > 0) add('library:edited', 'warn', `edited or missing in the library, so the next update will overwrite them: ${edited.join(', ')}`);
+    } catch (e) {
+      add('library:edited', 'warn', `checking the library files failed: ${msg(e)}`);
+    }
+  }
+  const lock = await readLock(lib.dir);
+  if (lock && !lock.alive) add('library:lock', 'warn', `stale update lock from pid ${lock.pid}`);
 
   // Registry access, one check per name (top-level entries, includes, resolved sources, and anything a problem names).
   const names: string[] = [];

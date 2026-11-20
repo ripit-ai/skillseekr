@@ -1,7 +1,8 @@
 import { resolve } from 'node:path';
 import type { Command } from 'commander';
 import { DEFAULT_REGISTRY, SETUP_TOOLS, setup, type Change, type SetupTool } from '../../setup/setup.js';
-import { CliError, isJson, printJson, type Cli, type Io } from '../output.js';
+import { CliError, isJson, printJson, reportProblems, type Cli, type Io } from '../output.js';
+import { printUpdateSummary } from './update.js';
 import { doctorFailure, printDoctor } from './doctor.js';
 
 interface SetupOpts { tools?: string; yes?: boolean; registry?: string; vscodeWorkspace?: string }
@@ -34,6 +35,11 @@ const confirmWith = (io: Io, json: boolean) => async (planned: Change[]): Promis
   return answer === '' || /^y(es)?$/i.test(answer);
 };
 
+const confirmUpdateWith = (io: Io) => async (): Promise<boolean> => {
+  if (!io.prompt) return false;
+  return /^y(es)?$/i.test((await io.prompt('Update the skill library now? [y/N] ')).trim());
+};
+
 export function registerSetup(program: Command, cli: Cli): void {
   program.command('setup').description('write the config if missing, register the MCP server and starter skill with each tool found, then run doctor')
     .option('--tools <list>', `comma-separated: ${SETUP_TOOLS.join(',')} (default: every tool found)`)
@@ -50,6 +56,7 @@ export function registerSetup(program: Command, cli: Cli): void {
           ...(opts.registry !== undefined ? { registry: opts.registry } : {}),
           ...(opts.vscodeWorkspace !== undefined ? { vscodeWorkspace: resolve(cli.ctx.cwd, opts.vscodeWorkspace) } : {}),
           confirm: confirmWith(cli.io, isJson(cmd)),
+          confirmUpdate: confirmUpdateWith(cli.io),
         });
       } catch (e) {
         if (e instanceof CliError) throw e;
@@ -59,6 +66,13 @@ export function registerSetup(program: Command, cli: Cli): void {
       if (isJson(cmd)) printJson(cli.io, result);
       else {
         cli.io.out(result.changes.length ? `changed:\n${changeLines(result.changes)}` : 'nothing to change\n');
+        cli.io.out('\nlibrary:\n');
+        const u = result.update;
+        if ('skipped' in u) cli.io.out("skipped; run 'skillseekr update' when you're ready\n");
+        else {
+          if (!u.aborted) printUpdateSummary(cli.io, u);
+          reportProblems(cli.io, u.problems, u.stale);
+        }
         cli.io.out('\ndoctor:\n');
         printDoctor(cli.io, result.doctor);
       }

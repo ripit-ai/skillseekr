@@ -1,8 +1,15 @@
 import type { Command } from 'commander';
-import { runUpdate } from '../../library/update.js';
-import { CliError, errorProblems, isJson, printJson, reportProblems, table, type Cli } from '../output.js';
+import { runUpdate, type UpdateReport } from '../../library/update.js';
+import { CliError, errorProblems, isJson, printJson, reportProblems, table, type Cli, type Io } from '../output.js';
 
 const MARK = { added: '+', changed: '~', removed: '-' } as const;
+
+/** The summary line and the per-skill change list of a finished (not aborted) update. */
+export function printUpdateSummary(io: Io, report: UpdateReport): void {
+  const n = (c: string) => report.changes.filter((x) => x.change === c).length;
+  io.out(`updated ${report.registries} registries: ${n('added')} skills added, ${n('changed')} changed, ${n('removed')} removed\n`);
+  for (const c of report.changes) io.out(`  ${MARK[c.change]} ${c.id} (${c.registry})\n`);
+}
 
 export function registerUpdate(program: Command, cli: Cli): void {
   program.command('update [name]').description('pull the skill library from the registries and refresh installed skills')
@@ -12,15 +19,11 @@ export function registerUpdate(program: Command, cli: Cli): void {
       const report = await runUpdate(cli.ctx, {
         ...(name !== undefined && { name }), force: opts.force === true, installs: opts.installs !== false, projectDir: cli.ctx.cwd,
       });
-      const { installs, changes } = report;
+      const { installs } = report;
       const failed = installs.filter((r) => r.result === 'failed');
       if (isJson(cmd)) printJson(cli.io, report);
       else {
-        if (!report.aborted) {
-          const n = (c: string) => changes.filter((x) => x.change === c).length;
-          cli.io.out(`updated ${report.registries} registries: ${n('added')} skills added, ${n('changed')} changed, ${n('removed')} removed\n`);
-          for (const c of changes) cli.io.out(`  ${MARK[c.change]} ${c.id} (${c.registry})\n`);
-        }
+        if (!report.aborted) printUpdateSummary(cli.io, report);
         reportProblems(cli.io, report.problems, report.stale);
         if (installs.length > 0) {
           cli.io.out(table(installs.map((r) => [r.name, r.result, r.dir])));

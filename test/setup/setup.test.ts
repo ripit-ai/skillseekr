@@ -5,7 +5,6 @@ import type { Ctx, Exec, ExecResult } from '../../src/context.js';
 import { setup } from '../../src/setup/setup.js';
 import { doctor } from '../../src/doctor.js';
 import { createEngine } from '../../src/engine.js';
-import { pull } from '../helpers/library.js';
 import { claudeRegistrar } from '../../src/setup/registrars/claude.js';
 import { readJsonValue } from '../../src/setup/jsonMerge.js';
 import { opencodeRegistrar } from '../../src/setup/registrars/opencode.js';
@@ -65,7 +64,7 @@ async function mtimes(root: string): Promise<Record<string, number>> {
     for (const e of await readdir(d, { withFileTypes: true })) {
       const p = join(d, e.name);
       if (e.isDirectory()) {
-        if (relative(root, p).startsWith('.cache')) continue;
+        if (relative(root, p).startsWith('.cache') || relative(root, p).startsWith('.skillseekr')) continue;
         await walk(p);
       } else out[relative(root, p)] = (await stat(p)).mtimeMs;
     }
@@ -240,8 +239,6 @@ describe('setup', () => {
   it('setup reports an unreadable registry by name through doctor (AC-2)', async () => {
     const e = await env();
     await setup(e.ctx, { yes: true, registry: 'acme/private' });
-    // Reads are offline: the failure shows once the library has been updated from the new config.
-    await pull(e.ctx);
     const { checks } = await doctor(createEngine(e.ctx), e.ctx);
     const fail = checks.find((c) => c.status === 'fail');
     expect(fail?.id).toBe('registry:acme');
@@ -297,5 +294,54 @@ describe('setup', () => {
     expect(r.changes.some((c) => c.file === e.configFile)).toBe(false);
     expect(r.changes.some((c) => c.file?.endsWith('mcp-config.json'))).toBe(true);
     expect(r.doctor.checks.length).toBeGreaterThan(0);
+  });
+
+  describe('library update', () => {
+    const manifest = (home: string) => join(home, '.skillseekr', 'library', 'manifest.json');
+    const has = (p: string) => stat(p).then(() => true, () => false);
+
+    it('runs the update after a y/Y/yes answer and skips it for anything else', async () => {
+      for (const a of ['y', 'Y', 'yes', ' YES ']) {
+        const e = await env();
+        const r = await setup(e.ctx, { yes: false, confirm: async () => true, confirmUpdate: async () => /^y(es)?$/i.test(a.trim()) });
+        expect('skipped' in r.update).toBe(false);
+        expect(await has(manifest(e.home))).toBe(true);
+      }
+      for (const a of ['', 'n', 'whatever']) {
+        const e = await env();
+        const r = await setup(e.ctx, { yes: false, confirm: async () => true, confirmUpdate: async () => /^y(es)?$/i.test(a.trim()) });
+        expect(r.update).toEqual({ skipped: true });
+        expect(await has(manifest(e.home))).toBe(false);
+      }
+    });
+
+    it('yes runs the update without asking', async () => {
+      const e = await env();
+      let asked = false;
+      const r = await setup(e.ctx, { yes: true, confirmUpdate: async () => { asked = true; return false; } });
+      expect(asked).toBe(false);
+      expect('skipped' in r.update).toBe(false);
+      expect(await has(manifest(e.home))).toBe(true);
+    });
+
+    it('with neither yes nor confirmUpdate it skips and makes no request', async () => {
+      const e = await env();
+      const gh = fakeGithub({});
+      const ctx = { ...e.ctx, http: gh.http };
+      const r = await setup(ctx, { yes: false, confirm: async () => true });
+      expect(r.update).toEqual({ skipped: true });
+      expect(gh.calls).toEqual([]);
+      expect(await has(manifest(e.home))).toBe(false);
+    });
+
+    it('a second run with nothing to change still asks', async () => {
+      const e = await env();
+      await setup(e.ctx, { yes: true });
+      let asked = 0;
+      const r = await setup(e.ctx, { yes: false, confirmUpdate: async () => { asked++; return false; } });
+      expect(r.changes).toEqual([]);
+      expect(asked).toBe(1);
+      expect(r.update).toEqual({ skipped: true });
+    });
   });
 });

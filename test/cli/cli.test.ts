@@ -457,7 +457,7 @@ describe('cli', () => {
     const s = await setup();
     await mkdir(join(s.ctx.home, '.copilot'));
     s.ctx.env.SKILLSEEKR_CONFIG = join(s.dir, 'new-config.jsonc');
-    const answers = ['n', ''];
+    const answers = ['n', '', ''];
     const asked: string[] = [];
     const out: string[] = []; const err: string[] = [];
     const io = { out: (x: string) => out.push(x), err: (x: string) => err.push(x), prompt: async (q: string) => { asked.push(q); return answers.shift()!; } };
@@ -466,12 +466,26 @@ describe('cli', () => {
     expect(out.join('')).toContain('mcp-config.json');
     out.length = 0;
     await main(['setup', '--tools', 'copilot'], { ctx: s.ctx, io });
-    expect(asked).toHaveLength(2);
+    expect(asked).toHaveLength(3);
+    expect(asked[2]).toBe('Update the skill library now? [y/N] ');
+    expect(out.join('')).toContain("skipped; run 'skillseekr update' when you're ready");
     expect(JSON.parse(await readFile(join(s.ctx.home, '.copilot', 'mcp-config.json'), 'utf8')).mcpServers.skillseekr.command).toBe('skillseekr');
     expect(out.join('')).toMatch(/doctor/i);
     const bad = await s.run('setup', '--tools', 'emacs', '--yes');
     expect(bad.code).toBe(1);
     expect(bad.err).toContain('emacs');
+  });
+
+  it('setup runs and summarizes the update after a yes answer', async () => {
+    const s = await setup();
+    await mkdir(join(s.ctx.home, '.copilot'));
+    s.ctx.env.SKILLSEEKR_CONFIG = join(s.dir, 'upd-config.jsonc');
+    const out: string[] = [];
+    const io = { out: (x: string) => out.push(x), err: () => {}, prompt: async (q: string) => (q.startsWith('Update') ? 'y' : '') };
+    await main(['setup', '--tools', 'copilot'], { ctx: s.ctx, io });
+    expect(out.join('')).toMatch(/updated \d+ registries: \d+ skills added, \d+ changed, \d+ removed/);
+    const noPrompt = await s.run('setup', '--tools', 'copilot');
+    expect(noPrompt.code).toBe(1);
   });
 
   it('setup --json without --yes keeps stdout pure JSON; the preview goes to stderr', async () => {
