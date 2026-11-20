@@ -25,7 +25,7 @@ const authCause = (problems: Problem[]): string => {
 };
 
 /** skill_name becomes a directory name, so it can never be empty, "." / "..", or hold a separator or NUL. */
-function invalidSkillName(name: string): Problem | undefined {
+export function invalidSkillName(name: string): Problem | undefined {
   if (!name || name === '.' || name === '..' || /[/\\\0]/.test(name)) {
     return errorProblem('source/invalid', `skill_name ${JSON.stringify(name)} is not a valid folder name (no "/", "\\", NUL, ".", ".." or empty)`);
   }
@@ -39,6 +39,29 @@ function failureFor(url: string, res: HttpResponse): Failure {
     return fail('source/no-access', `Cannot access ${url} (HTTP ${s}): it does not exist or you have no access. Check the URL and the configured auth.`);
   }
   return fail('source/http-error', `Unexpected response from ${url} (HTTP ${s})`);
+}
+
+const limitText = (maxBytes: number) => (maxBytes === MAX_HTTP_BYTES ? '1 MB' : `${maxBytes} bytes`);
+
+/**
+ * One GET with failures mapped to Problems. A 304 is returned as-is only when allowNotModified; any other
+ * non-2xx status or an oversize body is a Failure.
+ */
+async function getChecked(
+  url: string, headers: Record<string, string>, maxBytes: number, allowNotModified: boolean, ctx: Ctx,
+): Promise<HttpResponse | Failure> {
+  let res: HttpResponse;
+  try {
+    res = await ctx.http.get(url, headers, { maxBytes });
+  } catch (err) {
+    if (err instanceof TooLargeError) return fail('source/too-large', `${url} is over the ${limitText(maxBytes)} limit`);
+    if (err instanceof NetworkError) return fail('source/unreachable', `${url} is unreachable: ${err.message}`);
+    throw err;
+  }
+  if (res.status === 304 && allowNotModified) return res;
+  if (res.status < 200 || res.status > 299) return failureFor(url, res);
+  if (res.body.length > maxBytes) return fail('source/too-large', `${url} is over the ${limitText(maxBytes)} limit`);
+  return res;
 }
 
 /** Atomic: temp file next to the target, then rename. */
@@ -93,21 +116,12 @@ async function fetchCached(
   const headers: Record<string, string> = { 'User-Agent': 'skillseekr', ...a.headers };
   if (prev?.etag) headers['If-None-Match'] = prev.etag;
 
-  let res: HttpResponse;
-  try {
-    res = await ctx.http.get(e.url, headers, { maxBytes: MAX_HTTP_BYTES });
-  } catch (err) {
-    if (err instanceof TooLargeError) return useStale(fail('source/too-large', `${e.url} is over the 1 MB limit`));
-    if (err instanceof NetworkError) return useStale(fail('source/unreachable', `${e.url} is unreachable: ${err.message}`));
-    throw err;
-  }
-
+  const res = await getChecked(e.url, headers, MAX_HTTP_BYTES, prev !== undefined, ctx);
+  if ('error' in res) return useStale(res);
   if (res.status === 304 && prev) {
     await writeState(cache.dir, key, { etag: prev.etag, checkedAt: ctx.now() } satisfies HttpState).catch(() => {});
     return { body: prev.body, stale: false, problems, cached: true };
   }
-  if (res.status < 200 || res.status > 299) return useStale(failureFor(e.url, res));
-  if (res.body.length > MAX_HTTP_BYTES) return useStale(fail('source/too-large', `${e.url} is over the 1 MB limit`));
 
   let cached = true;
   try {
@@ -142,4 +156,22 @@ export async function fetchHttpText(
   const r = await fetchCached(e, file, dirname(file), opts, cache, ctx);
   if ('error' in r) return r;
   return { text: r.body.toString('utf8'), stale: r.stale, problems: r.problems };
+}
+
+/** A plain GET: no cache, no stale fallback. With opts.etag a 304 gives notModified. */
+export async function fetchHttpBody(
+  e: { url: string; auth: Auth },
+  opts: { trusted: boolean; etag?: string; maxBytes?: number },
+  ctx: Ctx,
+): Promise<{ notModified: true; problems: Problem[] } | { notModified: false; body: Buffer; etag?: string; problems: Problem[] } | { error: Problem }> {
+  const problems: Problem[] = [];
+  const a = await authHeaders(e.auth, { url: e.url, kind: 'http' }, { trusted: opts.trusted }, ctx);
+  if (a.problem) problems.push(a.problem);
+  const headers: Record<string, string> = { 'User-Agent': 'skillseekr', ...a.headers };
+  if (opts.etag) headers['If-None-Match'] = opts.etag;
+  const res = await getChecked(e.url, headers, opts.maxBytes ?? MAX_HTTP_BYTES, opts.etag !== undefined, ctx);
+  if ('error' in res) return { error: { ...res.error, message: `${res.error.message}${authCause(problems)}` } };
+  if (res.status === 304) return { notModified: true, problems };
+  const etag = res.headers['etag'];
+  return { notModified: false, body: res.body, ...(etag ? { etag } : {}), problems };
 }

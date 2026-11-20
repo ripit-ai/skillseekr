@@ -2,10 +2,10 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { existsSync } from 'node:fs';
-import { lstat, readdir, readFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import {
-  extractTarball, ExtractTooLargeError, isShaRef, materializeGithub, readGithubFile, type FetchOpts,
+  extractTarball, ExtractTooLargeError, fetchGithubFile, fetchGithubTree, invalidRepo, isShaRef, materializeGithub, readGithubFile, type FetchOpts,
 } from '../../src/sources/github.js';
 import { fetchHttp, NetworkError, type Http, type HttpResponse } from '../../src/net/http.js';
 import { resetGhTokenCache } from '../../src/auth.js';
@@ -499,5 +499,139 @@ describe('auth cause on errors', () => {
     const r = await materializeGithub(src('main', { type: 'bearer', env_var: 'BEARER_X' }), opts(), t.cache, t.ctx);
     expect('error' in r && r.error.code).toBe('source/no-access');
     expect('error' in r && r.error.message).toContain('BEARER_X');
+  });
+});
+
+describe('fetchGithubTree', () => {
+  const tree = (t: Awaited<ReturnType<typeof setup>>, into: string, o: { ref?: string; auth?: Auth; knownSha?: string } = {}) =>
+    fetchGithubTree(src(o.ref, o.auth), { trusted: true, knownSha: o.knownSha }, into, t.ctx);
+
+  it('a knownSha equal to the ref sha is unchanged and downloads nothing', async () => {
+    const t = await setup();
+    const into = join(t.dir, 'out');
+    const r = ok(await tree(t, into, { knownSha: SHA1 }));
+    expect(r).toMatchObject({ sha: SHA1, unchanged: true });
+    expect(t.fake.calls).toEqual(['/repos/acme/skills/commits/main']);
+    expect(existsSync(into)).toBe(false);
+  });
+
+  it('extracts the repo into intoDir and returns the ref sha', async () => {
+    const t = await setup();
+    const into = join(t.dir, 'out');
+    const r = ok(await tree(t, into, { knownSha: SHA2 }));
+    expect(r).toMatchObject({ sha: SHA1, unchanged: false });
+    for (const f of REAL_FILES) expect(await readFile(join(into, f), 'utf8')).toBe(FILES[f]);
+    expect(existsSync(join(into, 'evil-link'))).toBe(false);
+    expect(existsSync(join(t.dir, 'cache'))).toBe(false);
+  });
+
+  it('a sha ref makes no /commits/ request', async () => {
+    const t = await setup();
+    ok(await tree(t, join(t.dir, 'out'), { ref: SHA1 }));
+    expect(commitCalls(t.fake.calls)).toBe(0);
+    expect(tarballCalls(t.fake.calls)).toBe(1);
+  });
+
+  it('refuses an intoDir that already exists and leaves it alone', async () => {
+    const t = await setup();
+    const into = join(t.dir, 'out');
+    await mkdir(into);
+    await writeFile(join(into, 'keep'), 'x');
+    expect(err(await tree(t, into)).code).toBe('source/write-failed');
+    expect(await readFile(join(into, 'keep'), 'utf8')).toBe('x');
+  });
+
+  it('rejects an invalid repo without any request', async () => {
+    const t = await setup();
+    const e = err(await fetchGithubTree({ ...src(), owner: '..' }, { trusted: true }, join(t.dir, 'out'), t.ctx));
+    expect(e.code).toBe('source/invalid');
+    expect(t.fake.calls).toEqual([]);
+    expect(invalidRepo({ ...src(), repo: 'a/b' })?.code).toBe('source/invalid');
+  });
+
+  it('hostile tarballs write nothing outside intoDir', async () => {
+    const t = await setup();
+    const top = `acme-skills-${SHA1.slice(0, 7)}`;
+    const absTarget = join(t.dir, 'abs-evil');
+    const hostile = buildTarGz([
+      { path: `${top}/`, type: 'Directory' },
+      { path: `${top}/ok.txt`, type: 'File', body: 'ok' },
+      { path: '../evil', type: 'File', body: 'pwned' },
+      { path: `${top}/../../evil2`, type: 'File', body: 'pwned' },
+      { path: '/abs/evil', type: 'File', body: 'pwned' },
+      { path: absTarget, type: 'File', body: 'pwned' },
+      { path: `${top}/sym`, type: 'SymbolicLink', linkpath: '/etc/passwd' },
+      { path: `${top}/hard`, type: 'Link', linkpath: '/etc/passwd' },
+    ]);
+    t.ctx.http = stub((url) => (url.includes('/tarball/') ? { status: 200, headers: {}, body: hostile } : undefined), t.ctx.http);
+    const into = join(t.dir, 'work', 'out');
+    ok(await tree(t, into));
+    expect(await readdir(into)).toEqual(['ok.txt']);
+    expect((await walk(t.dir)).map((e) => relative(t.dir, e.path)).sort()).toEqual(['work', 'work/out', 'work/out/ok.txt']);
+    expect(existsSync('/abs/evil')).toBe(false);
+    expect(existsSync(absTarget)).toBe(false);
+  });
+
+  it('an oversize download or expansion gives source/too-large and removes intoDir', async () => {
+    const huge = buildTarGz([
+      { path: 'top/', type: 'Directory' },
+      { path: 'top/small', type: 'File', body: 'x' },
+      { path: 'top/huge', type: 'File', size: 500 * 1024 * 1024 },
+    ]);
+    const big = Buffer.alloc(100 * 1024 * 1024 + 1);
+    for (const body of [huge, big]) {
+      const t = await setup();
+      t.ctx.http = stub((url) => (url.includes('/tarball/') ? { status: 200, headers: {}, body } : undefined), t.ctx.http);
+      const into = join(t.dir, 'out');
+      const e = err(await tree(t, into));
+      expect(e.code).toBe('source/too-large');
+      expect(existsSync(into)).toBe(false);
+    }
+  });
+
+  it('a corrupt tarball gives source/bad-archive and removes intoDir', async () => {
+    const t = await setup();
+    t.ctx.http = stub((url) => (url.includes('/tarball/') ? res(200, 'not a tarball') : undefined), t.ctx.http);
+    const into = join(t.dir, 'out');
+    expect(err(await tree(t, into)).code).toBe('source/bad-archive');
+    expect(existsSync(into)).toBe(false);
+  });
+
+  it('a 404 with gh_cli auth gives source/no-access mentioning gh auth login', async () => {
+    const t = await setup({ token: 'secret' });
+    const e = err(await tree(t, join(t.dir, 'out'), { auth: { type: 'gh_cli' } }));
+    expect(e.code).toBe('source/no-access');
+    expect(e.message).toContain('gh auth login');
+  });
+
+  it('never serves a stale copy: offline is an error', async () => {
+    const t = await setup();
+    t.fake.offline(true);
+    expect(err(await tree(t, join(t.dir, 'out'))).code).toBe('source/unreachable');
+  });
+});
+
+describe('fetchGithubFile', () => {
+  it('reads a file at the resolved sha', async () => {
+    const t = await setup();
+    const r = ok(await fetchGithubFile({ ...src(), path: 'README.md' }, { trusted: true }, t.ctx));
+    expect(r).toMatchObject({ sha: SHA1, text: FILES['README.md'] });
+  });
+
+  it('a sha ref makes no /commits/ request', async () => {
+    const t = await setup();
+    ok(await fetchGithubFile({ ...src(SHA1), path: 'README.md' }, { trusted: true }, t.ctx));
+    expect(commitCalls(t.fake.calls)).toBe(0);
+  });
+
+  it('rejects an escaping path without any request', async () => {
+    const t = await setup();
+    expect(err(await fetchGithubFile({ ...src(), path: '../x' }, { trusted: true }, t.ctx)).code).toBe('source/invalid');
+    expect(t.fake.calls).toEqual([]);
+  });
+
+  it('a missing file is source/no-access', async () => {
+    const t = await setup();
+    expect(err(await fetchGithubFile({ ...src(), path: 'nope.md' }, { trusted: true }, t.ctx)).code).toBe('source/no-access');
   });
 });

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fetchHttpText, materializeHttpSkill } from '../../src/sources/http.js';
+import { fetchHttpBody, fetchHttpText, invalidSkillName, materializeHttpSkill } from '../../src/sources/http.js';
 import type { FetchOpts } from '../../src/sources/github.js';
 import type { Ctx } from '../../src/context.js';
 import type { Auth, CacheSettings } from '../../src/types.js';
@@ -226,5 +226,60 @@ describe('fetchHttpText', () => {
     t.fake.offline(true);
     const r2 = await fetchHttpText({ url: URL2, auth: { type: 'none' } }, opts(), t.cache, t.ctx);
     expect('error' in r2 && r2.error.code).toBe('source/unreachable');
+  });
+});
+
+describe('fetchHttpBody', () => {
+  it('returns the body and etag, and sends no If-None-Match without one', async () => {
+    const t = await setup({ [URL1]: { body: BODY, etag: '"a"' } });
+    const r = await fetchHttpBody({ url: URL1, auth: { type: 'none' } }, { trusted: true }, t.ctx);
+    expect(r).toMatchObject({ notModified: false, etag: '"a"' });
+    expect('body' in r && r.body.toString()).toBe(BODY);
+    expect(t.fake.calls[0].headers['If-None-Match']).toBeUndefined();
+  });
+
+  it('a matching etag gives notModified', async () => {
+    const t = await setup({ [URL1]: { body: BODY, etag: '"a"' } });
+    const r = await fetchHttpBody({ url: URL1, auth: { type: 'none' } }, { trusted: true, etag: '"a"' }, t.ctx);
+    expect(r).toMatchObject({ notModified: true });
+  });
+
+  it('a changed body gives the new etag', async () => {
+    const t = await setup({ [URL1]: { body: 'new', etag: '"b"' } });
+    const r = await fetchHttpBody({ url: URL1, auth: { type: 'none' } }, { trusted: true, etag: '"a"' }, t.ctx);
+    expect(r).toMatchObject({ notModified: false, etag: '"b"' });
+    expect('body' in r && r.body.toString()).toBe('new');
+  });
+
+  it('an oversize body is source/too-large, honouring maxBytes', async () => {
+    const t = await setup({ [URL1]: { body: 'x'.repeat(100) } });
+    const r = await fetchHttpBody({ url: URL1, auth: { type: 'none' } }, { trusted: true, maxBytes: 10 }, t.ctx);
+    expect('error' in r && r.error.code).toBe('source/too-large');
+    const ok = await fetchHttpBody({ url: URL1, auth: { type: 'none' } }, { trusted: true, maxBytes: 100 }, t.ctx);
+    expect(ok).toMatchObject({ notModified: false });
+  });
+
+  it('never falls back to a copy: offline and 404 are errors, and nothing is cached', async () => {
+    const t = await setup({ [URL1]: { body: BODY } });
+    t.fake.offline(true);
+    const off = await fetchHttpBody({ url: URL1, auth: { type: 'none' } }, { trusted: true }, t.ctx);
+    expect('error' in off && off.error.code).toBe('source/unreachable');
+    const miss = await fetchHttpBody({ url: 'https://example.test/none', auth: { type: 'none' } }, { trusted: true }, { ...t.ctx, http: fakeHttp({}).http });
+    expect('error' in miss && miss.error.code).toBe('source/no-access');
+    expect(existsSync(t.cache.dir)).toBe(false);
+  });
+
+  it('names the auth cause on an error', async () => {
+    const t = await setup({ [URL1]: { body: BODY, requireAuth: 'Bearer s' } });
+    const r = await fetchHttpBody({ url: URL1, auth: { type: 'bearer', env_var: 'NOPE' } }, { trusted: true }, t.ctx);
+    expect('error' in r && r.error.code).toBe('source/no-access');
+    expect('error' in r && r.error.message).toContain('(auth:');
+  });
+});
+
+describe('invalidSkillName', () => {
+  it('rejects names that cannot be a folder', () => {
+    for (const n of ['', '.', '..', 'a/b', 'a\\b']) expect(invalidSkillName(n)?.code).toBe('source/invalid');
+    expect(invalidSkillName('foo')).toBeUndefined();
   });
 });
