@@ -55,7 +55,7 @@ export function createMcpServer(engine: Engine, ctx: Ctx, opts: { rootsTimeoutMs
   const withCatalog = async (fn: (c: Catalog) => Promise<Result>): Promise<Result> => {
     const c = await engine.catalog();
     if (c.problems.some((p) => p.code === 'library/empty')) {
-      return fail({ error: 'library-empty', message: "the skill library is empty; ask the user whether to update it (update_skills, or 'skillseekr update')" });
+      return fail({ error: 'library-empty', message: "the skill library is empty; ask the user whether to update it (update_skills, or 'skillseekr update')", problems: errorsOf(c.problems) });
     }
     return fn(c);
   };

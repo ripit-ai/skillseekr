@@ -96,6 +96,8 @@ describe('mcp server', () => {
   it('a running server sees a library updated by another process', async () => {
     const f = { repos: { 'o/a': { refs: { main: SHA }, commits: { [SHA]: { 'skills/a/SKILL.md': skill('a') } } } } as FakeSpec, registries: { a: gh('a') } };
     const s = await setup(f);
+    const before = await s.call('search_skills', { query: 'zeta' });
+    expect(before.data.results.map((x: any) => x.id)).not.toContain('zeta');
     const SHA2 = 'b'.repeat(40);
     const github = fakeGithub({ 'o/a': { refs: { main: SHA2 }, commits: { [SHA2]: { 'skills/a/SKILL.md': skill('a'), 'skills/zeta/SKILL.md': skill('zeta') } } } });
     const { runUpdate } = await import('../../src/library/update.js');
@@ -240,6 +242,7 @@ describe('mcp server', () => {
     const r = await s.call('search_skills', { query: 'anything' });
     expect(r.isError).toBe(true);
     expect(r.data.error).toBe('library-empty');
+    expect(r.data.problems.map((p: { code: string }) => p.code)).toContain('config/missing');
   });
 
   it('a roots handler that never answers times out and falls back to ctx.cwd', async () => {
