@@ -11,7 +11,7 @@ import type { IncludeEntry, Problem } from '../types.js';
 import { githubFolder, httpFolder, includeFile, STAGING } from './layout.js';
 import { acquireLock, LockBusyError } from './lock.js';
 import { MANIFEST_VERSION, manifestFile, readManifest, writeManifest, type IncludeRecord, type Manifest, type ManifestSkill, type SourceRecord } from './manifest.js';
-import { cleanLeftovers, prune, removeOld, swapIn } from './swap.js';
+import { cleanLeftovers, prune, removeOld, rollBack, swapIn } from './swap.js';
 import { textHash, verifyFolders } from './verify.js';
 
 export interface SkillChange { id: string; registry: string; change: 'added' | 'changed' | 'removed' }
@@ -22,6 +22,9 @@ export interface PullResult { aborted: boolean; manifest?: Manifest; changes: Sk
 export const pullHooks = {
   beforeSwap: async (_s: StagedSource[]): Promise<{ reject?: string[]; abort?: string }> => ({}),
 };
+
+/** Filesystem steps of the swap, replaceable in tests to inject failures. */
+export const pullFs = { swapIn, writeManifest };
 
 /** SHA-256 (hex) of the config file text an update resolved. */
 export const configHash = (text: string): string => createHash('sha256').update(text).digest('hex');
@@ -194,87 +197,111 @@ async function pullLocked(
     }
   }
 
-  // ---- swap ----
-  const olds: string[] = [];
-  for (const g of groups.values()) {
-    if (g.outcome?.kind !== 'staged') continue;
-    try {
-      const old = await swapIn(libDir, g.outcome.stagedDir!, g.folder);
-      if (old) olds.push(old);
-    } catch (e) {
-      g.outcome = { kind: 'failed', error: writeFailed(join(libDir, g.folder), e) };
-    }
-  }
-  const unswapped = new Set<string>();
-  for (const [file, path] of stagedFiles) {
-    try {
-      const old = await swapIn(libDir, path, file);
-      if (old) olds.push(old);
-    } catch (e) {
-      unswapped.add(file);
-      problems.push(writeFailed(join(libDir, file), e));
-    }
-  }
-
-  // ---- records ----
-  const sources: SourceRecord[] = [];
-  for (const reg of res.registries) {
-    const g = [...groups.values()].find((x) => x.regs.includes(reg));
-    const o: Outcome = g?.outcome ?? { kind: 'failed', error: invalid.get(reg.name)! };
-    if (o.kind === 'failed') {
-      problems.push(attach(o.error, reg));
-      const old = prev?.sources.find((s) => s.name === reg.name);
-      sources.push(old?.folder ? { ...old, stale: true } : { name: reg.name, via: reg.via, trusted: reg.trusted, entry: reg.entry, stale: false, skills: [] });
-      continue;
-    }
-    sources.push({
-      name: reg.name, via: reg.via, trusted: reg.trusted, entry: reg.entry, folder: g!.folder,
-      ...(o.sha ? { sha: o.sha } : {}), ...(o.etag ? { etag: o.etag } : {}), fetchedAt: now, stale: false,
-      skills: o.skills.get(reg.name) ?? [],
-    });
-  }
-  const includes: IncludeRecord[] = res.includes.map((i) => {
-    const x = incInfo.get(targetKey(i.entry));
-    const file = x && !unswapped.has(x.file) ? x : undefined;
-    return {
-      name: i.name, via: i.via, entry: i.entry, policy: i.policy, stale: i.stale, ...(i.sha !== undefined ? { sha: i.sha } : {}),
-      ...(file ? { file: file.file, ...(file.textHash ? { textHash: file.textHash } : {}) } : {}),
-      ...(x?.fetchedAt ? { fetchedAt: x.fetchedAt } : {}),
-    };
-  });
-
-  // Prune only after a clean resolution; otherwise keep what went missing, marked stale.
-  const clean = !res.stale && !res.problems.some((p) => p.level === 'error');
-  if (!clean && prev) {
-    for (const old of prev.sources) {
-      if (sources.some((s) => s.name === old.name) || !old.folder) continue;
-      sources.push({ ...old, stale: true });
-      problems.push({
-        level: 'warning', code: 'source/stale', registry: old.name, via: old.via,
-        message: `registry "${old.name}" is no longer in the resolution, but the resolution had errors; keeping its previous copy until an update without errors`,
-      });
-    }
-    for (const old of prev.includes) {
-      if (old.file && !includes.some((i) => i.file === old.file)) includes.push({ ...old, stale: true });
-    }
-  }
-
-  const manifest: Manifest = {
-    version: MANIFEST_VERSION, updatedAt: now, configHash: configHash(text),
-    sources, includes, overrides: res.overrides, problems: [...problems],
-  };
-  const stale = res.stale || sources.some((s) => s.stale);
+  // ---- swap, records, manifest: any failure here rolls every swap back ----
+  const swapped: Array<{ rel: string; old?: string }> = [];
+  let failure: Problem | undefined;
+  let manifest: Manifest | undefined;
+  let clean = false;
   try {
-    await writeManifest(libDir, manifest);
+    ({ manifest, clean } = await swapAndRecord());
   } catch (e) {
-    return { aborted: false, changes: [], problems: [...problems, writeFailed(manifestFile(libDir), e)], stale };
+    failure = e instanceof ManifestWriteError ? writeFailed(manifestFile(libDir), e.cause)
+      : err('library/write-failed', `the update of ${libDir} failed unexpectedly: ${msg(e)}`);
   }
-  await removeOld(olds);
+  if (failure || !manifest) {
+    const lost = await rollBack(libDir, swapped);
+    return abort([...problems, failure!, ...lost.map((p) => err('library/write-failed', `cannot restore ${p} after a failed update`))]);
+  }
+  const stale = res.stale || manifest.sources.some((s) => s.stale) || manifest.includes.some((i) => i.stale);
+  await removeOld(swapped.flatMap((x) => (x.old ? [x.old] : [])));
   if (clean) {
-    const keep = [...sources.flatMap((s) => (s.folder ? [s.folder] : [])), ...includes.flatMap((i) => (i.file ? [i.file] : []))];
+    const keep = [...manifest.sources.flatMap((s) => (s.folder ? [s.folder] : [])), ...manifest.includes.flatMap((i) => (i.file ? [i.file] : []))];
     for (const f of await prune(libDir, keep)) problems.push(err('library/write-failed', `cannot remove ${join(libDir, f)}, which is no longer used`));
   }
   return { aborted: false, manifest, changes: diff(prev, manifest), problems, stale };
+
+  async function swapAndRecord(): Promise<{ manifest: Manifest; clean: boolean }> {
+    for (const g of groups.values()) {
+      if (g.outcome?.kind !== 'staged') continue;
+      try {
+        swapped.push({ rel: g.folder, old: await pullFs.swapIn(libDir, g.outcome.stagedDir!, g.folder) });
+      } catch (e) {
+        g.outcome = { kind: 'failed', error: writeFailed(join(libDir, g.folder), e) };
+      }
+    }
+    const unswapped = new Set<string>();
+    for (const [file, path] of stagedFiles) {
+      try {
+        swapped.push({ rel: file, old: await pullFs.swapIn(libDir, path, file) });
+      } catch (e) {
+        unswapped.add(file);
+        problems.push(writeFailed(join(libDir, file), e));
+      }
+    }
+
+    // ---- records ----
+    const sources: SourceRecord[] = [];
+    for (const reg of res.registries) {
+      const g = [...groups.values()].find((x) => x.regs.includes(reg));
+      const o: Outcome = g?.outcome ?? { kind: 'failed', error: invalid.get(reg.name)! };
+      if (o.kind === 'failed') {
+        problems.push(attach(o.error, reg));
+        const old = prev?.sources.find((s) => s.name === reg.name);
+        sources.push(old?.folder ? { ...old, stale: true } : { name: reg.name, via: reg.via, trusted: reg.trusted, entry: reg.entry, stale: false, skills: [] });
+        continue;
+      }
+      sources.push({
+        name: reg.name, via: reg.via, trusted: reg.trusted, entry: reg.entry, folder: g!.folder,
+        ...(o.sha ? { sha: o.sha } : {}), ...(o.etag ? { etag: o.etag } : {}), fetchedAt: now, stale: false,
+        skills: o.skills.get(reg.name) ?? [],
+      });
+    }
+    const includes: IncludeRecord[] = res.includes.map((i) => {
+      const x = incInfo.get(targetKey(i.entry));
+      const base = { name: i.name, via: i.via, entry: i.entry, policy: i.policy };
+      if (x && unswapped.has(x.file)) {
+        // The new text could not be stored: the restored previous copy (if it verified) stays referenced, stale.
+        const old = prev?.includes.find((p) => p.file === x.file && !badPrev.has(x.file));
+        return old ? { ...old, ...base, stale: true } : { ...base, stale: true };
+      }
+      return {
+        ...base, stale: i.stale, ...(i.sha !== undefined ? { sha: i.sha } : {}),
+        ...(x ? { file: x.file, ...(x.textHash ? { textHash: x.textHash } : {}) } : {}),
+        ...(x?.fetchedAt ? { fetchedAt: x.fetchedAt } : {}),
+      };
+    });
+
+    // Prune only after a clean resolution and no failed write; otherwise keep what went missing, marked stale.
+    const clean = !res.stale && !res.problems.some((p) => p.level === 'error') && !problems.some((p) => p.code === 'library/write-failed');
+    if (!clean && prev) {
+      for (const old of prev.sources) {
+        if (sources.some((s) => s.name === old.name) || !old.folder) continue;
+        sources.push({ ...old, stale: true });
+        problems.push({
+          level: 'warning', code: 'source/stale', registry: old.name, via: old.via,
+          message: `registry "${old.name}" is no longer in the resolution, but the resolution had errors; keeping its previous copy until an update without errors`,
+        });
+      }
+      for (const old of prev.includes) {
+        if (old.file && !includes.some((i) => i.file === old.file)) includes.push({ ...old, stale: true });
+      }
+    }
+
+    const manifest: Manifest = {
+      version: MANIFEST_VERSION, updatedAt: now, configHash: configHash(text),
+      sources, includes, overrides: res.overrides, problems: [...problems],
+    };
+    try {
+      await pullFs.writeManifest(libDir, manifest);
+    } catch (e) {
+      throw new ManifestWriteError(e);
+    }
+    return { manifest, clean };
+  }
+}
+
+class ManifestWriteError extends Error {
+  constructor(cause: unknown) { super(msg(cause), { cause }); }
 }
 
 function diff(prev: Manifest | undefined, next: Manifest): SkillChange[] {

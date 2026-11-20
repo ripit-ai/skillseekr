@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, beforeEach, onTestFinished } from 'vit
 import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
-import { pullLibrary, pullHooks } from '../../src/library/pull.js';
+import { pullLibrary, pullHooks, pullFs } from '../../src/library/pull.js';
 import { verifyFolders } from '../../src/library/verify.js';
 import { acquireLock, LockBusyError } from '../../src/library/lock.js';
 import { readManifest, manifestFile } from '../../src/library/manifest.js';
@@ -24,8 +24,9 @@ const gh = (repo: string, extra: Record<string, unknown> = {}) =>
 const repoWith = (files: Record<string, string>, sha = SHA1) => ({ refs: { main: sha }, commits: { [sha]: files } });
 
 const realHook = pullHooks.beforeSwap;
+const realFs = { ...pullFs };
 beforeEach(() => resetGhTokenCache());
-afterEach(() => { pullHooks.beforeSwap = realHook; resetGhTokenCache(); });
+afterEach(() => { pullHooks.beforeSwap = realHook; Object.assign(pullFs, realFs); resetGhTokenCache(); });
 
 async function setup(o: { repos?: FakeSpec; routes?: Record<string, FakeRoute>; lib?: (dir: string) => string } = {}) {
   const dir = await tmpDir();
@@ -341,5 +342,52 @@ describe('pullLibrary', () => {
     expect(r.manifest!.sources.filter((x) => x.folder).map((x) => x.name)).toEqual(['r']);
     expect(s.github.calls.every((c) => c.startsWith('/repos/o/r/'))).toBe(true);
     expect(s.web.calls).toEqual([]);
+  });
+
+  it('a failed manifest write rolls every swap back: old trees, include files and manifest intact', async () => {
+    const s = await setup({
+      repos: {
+        'o/inc': repoWith({ 'registries.jsonc': JSON.stringify({ registries: { r: gh('r') } }) }),
+        'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }),
+      },
+    });
+    await s.write({ inc: { type: 'github-registry', owner: 'o', repo: 'inc', ref: 'main' } });
+    await pull(s.ctx);
+    const before = await snapshot(s.lib);
+    s.repos['o/r'] = repoWith({ 'skills/a/SKILL.md': skill('a', ' v2'), 'skills/b/SKILL.md': skill('b') }, SHA2);
+    s.repos['o/inc'] = repoWith({ 'registries.jsonc': JSON.stringify({ registries: { r: gh('r'), extra: gh('r', { description: 'x' }) } }) }, SHA2);
+    pullFs.writeManifest = async () => { throw new Error('disk full'); };
+    const r = await pullLibrary(s.ctx);
+    expect(r.problems).toContainEqual(expect.objectContaining({ code: 'library/write-failed', message: expect.stringContaining(manifestFile(s.lib)) }));
+    expect(r.changes).toEqual([]);
+    expect(await snapshot(s.lib)).toEqual(before);
+  });
+
+  it('a failed include swap keeps the previous include file and record, so a later pull can fall back to it', async () => {
+    const s = await setup({
+      repos: {
+        'o/inc': repoWith({ 'registries.jsonc': JSON.stringify({ registries: { r: gh('r') } }) }),
+        'o/r': repoWith({ 'skills/a/SKILL.md': skill('a') }),
+      },
+    });
+    await s.write({ inc: { type: 'github-registry', owner: 'o', repo: 'inc', ref: 'main' } });
+    await pull(s.ctx);
+    const file = join(s.lib, 'registries/github/o/inc@main/registries.jsonc');
+    const oldText = await readFile(file, 'utf8');
+    s.repos['o/inc'] = repoWith({ 'registries.jsonc': JSON.stringify({ registries: { r: gh('r', { description: 'new' }) } }) }, SHA2);
+    pullFs.swapIn = async (lib, staged, rel) => {
+      if (rel.startsWith('registries/')) throw new Error('EACCES');
+      return realFs.swapIn(lib, staged, rel);
+    };
+    const r = await pull(s.ctx);
+    expect(r.problems).toContainEqual(expect.objectContaining({ code: 'library/write-failed', message: expect.stringContaining(file) }));
+    expect(await readFile(file, 'utf8')).toBe(oldText);
+    expect(r.manifest!.includes).toMatchObject([{ name: 'inc', stale: true, file: 'registries/github/o/inc@main/registries.jsonc' }]);
+    expect(await verifyFolders(s.lib, r.manifest!)).toEqual([]);
+    Object.assign(pullFs, realFs);
+    delete s.repos['o/inc'];
+    const later = await pull(s.ctx);
+    expect(later.problems.some((p) => p.code === 'source/stale' && p.registry === 'inc')).toBe(true);
+    expect(later.manifest!.sources.map((x) => [x.name, x.skills.length])).toEqual([['r', 1]]);
   });
 });

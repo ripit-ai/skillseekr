@@ -68,3 +68,23 @@ export async function prune(libDir: string, keep: Iterable<string>): Promise<str
   }
   return failed;
 }
+
+/**
+ * Undoes swaps, newest first: the new item is moved aside (to a `.old-*` name, deleted later) and the
+ * previous one renamed back. Returns the paths it could not restore.
+ */
+export async function rollBack(libDir: string, swapped: Array<{ rel: string; old?: string }>): Promise<string[]> {
+  const failed: string[] = [];
+  for (const { rel, old } of [...swapped].reverse()) {
+    const target = join(libDir, rel);
+    try {
+      await rename(target, join(libDir, `${OLD_PREFIX}rb-${randomBytes(6).toString('hex')}`)).catch((e: NodeJS.ErrnoException) => {
+        if (e.code !== 'ENOENT') throw e;
+      });
+      if (old) await rename(old, target);
+    } catch {
+      failed.push(target);
+    }
+  }
+  return failed;
+}
