@@ -488,6 +488,44 @@ describe('cli', () => {
     expect(noPrompt.code).toBe(1);
   });
 
+  it('setup prompt: only y/yes (any case, trimmed) runs the update; the real prompt is used', async () => {
+    for (const [answer, runs] of [['Y', true], ['yes', true], [' YES ', true], ['y', true], ['n', false], ['whatever', false], ['', false]] as const) {
+      const s = await setup();
+      await mkdir(join(s.ctx.home, '.copilot'));
+      s.ctx.env.SKILLSEEKR_CONFIG = join(s.dir, 'p-config.jsonc');
+      const io = { out: () => {}, err: () => {}, prompt: async (q: string) => (q.startsWith('Update') ? answer : '') };
+      await main(['setup', '--tools', 'copilot'], { ctx: s.ctx, io });
+      const manifest = await stat(join(s.ctx.home, '.skillseekr', 'library', 'manifest.json')).then(() => true, () => false);
+      expect(manifest, `answer ${JSON.stringify(answer)}`).toBe(runs);
+    }
+  });
+
+  it('setup shows install results of its update: table, modified hint, missing-from-catalog hint, failures', async () => {
+    const s = await setup({ registries: { one: gh('one') } });
+    await s.run('install', 'alpha');
+    await writeFile(join(s.cwd, '.claude', 'skills', 'alpha', 'SKILL.md'), 'local edit');
+    await mkdir(join(s.ctx.home, '.copilot'));
+    const r = await s.run('setup', '--tools', 'copilot', '--yes');
+    expect(r.out).toMatch(/alpha\s+skipped-modified/);
+    expect(r.out).toContain('modified installs were skipped; use --force to overwrite them');
+    // Remove the registry from the config, then the installed skill is no longer in the catalog.
+    await writeFile(s.path, JSON.stringify({ library: { dir: s.lib }, registries: { two: gh('two') } }));
+    const m = await s.run('setup', '--tools', 'copilot', '--yes');
+    expect(m.err).toContain('no longer in the catalog');
+  });
+
+  it('setup exits 1 when its confirmed update is aborted (held lock)', async () => {
+    const s = await setup();
+    await mkdir(join(s.ctx.home, '.copilot'));
+    s.ctx.env.SKILLSEEKR_CONFIG = join(s.dir, 'lock-config.jsonc');
+    const lib = join(s.ctx.home, '.skillseekr', 'library');
+    await mkdir(lib, { recursive: true });
+    await writeFile(join(lib, '.lock'), JSON.stringify({ pid: process.pid, at: '2023-01-01T00:00:00.000Z' }));
+    const r = await s.run('setup', '--tools', 'copilot', '--yes');
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('library update:');
+  });
+
   it('setup --json without --yes keeps stdout pure JSON; the preview goes to stderr', async () => {
     const s = await setup();
     await mkdir(join(s.ctx.home, '.copilot'));

@@ -2,7 +2,7 @@ import { resolve } from 'node:path';
 import type { Command } from 'commander';
 import { DEFAULT_REGISTRY, SETUP_TOOLS, setup, type Change, type SetupTool } from '../../setup/setup.js';
 import { CliError, isJson, printJson, reportProblems, type Cli, type Io } from '../output.js';
-import { printUpdateSummary } from './update.js';
+import { printInstallResults, printUpdateSummary } from './update.js';
 import { doctorFailure, printDoctor } from './doctor.js';
 
 interface SetupOpts { tools?: string; yes?: boolean; registry?: string; vscodeWorkspace?: string }
@@ -72,10 +72,12 @@ export function registerSetup(program: Command, cli: Cli): void {
         else {
           if (!u.aborted) printUpdateSummary(cli.io, u);
           reportProblems(cli.io, u.problems, u.stale);
+          printInstallResults(cli.io, u, { text: true, none: false });
         }
         cli.io.out('\ndoctor:\n');
         printDoctor(cli.io, result.doctor);
       }
+      if (isJson(cmd) && !('skipped' in result.update)) printInstallResults(cli.io, result.update, { text: false, none: false });
       for (const e of result.errors) cli.io.err(`setup: ${e}\n`);
       const failure = doctorFailure(result.doctor);
       if (failure) throw failure;

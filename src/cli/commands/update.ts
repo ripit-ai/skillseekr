@@ -11,6 +11,21 @@ export function printUpdateSummary(io: Io, report: UpdateReport): void {
   for (const c of report.changes) io.out(`  ${MARK[c.change]} ${c.id} (${c.registry})\n`);
 }
 
+/** Install results: the table and hints (text mode only), failures and the missing-from-catalog hint (stderr, always). */
+export function printInstallResults(io: Io, report: UpdateReport, o: { text: boolean; none: boolean }): void {
+  const { installs } = report;
+  if (o.text) {
+    if (installs.length > 0) {
+      io.out(table(installs.map((r) => [r.name, r.result, r.dir])));
+      if (installs.some((r) => r.result === 'skipped-modified')) io.out('modified installs were skipped; use --force to overwrite them\n');
+    } else if (o.none) io.out('no skills installed\n');
+  }
+  for (const f of installs.filter((r) => r.result === 'failed')) io.err(`${f.name}: ${f.message} (${f.dir})\n`);
+  if (installs.some((r) => r.result === 'missing-from-catalog')) {
+    io.err("hint: some installed skills are no longer in the catalog (registry removed, renamed or failing); check 'skillseekr registries'\n");
+  }
+}
+
 export function registerUpdate(program: Command, cli: Cli): void {
   program.command('update [name]').description('pull the skill library from the registries and refresh installed skills')
     .option('--force', 'also overwrite locally modified installs')
@@ -25,16 +40,9 @@ export function registerUpdate(program: Command, cli: Cli): void {
       else {
         if (!report.aborted) printUpdateSummary(cli.io, report);
         reportProblems(cli.io, report.problems, report.stale);
-        if (installs.length > 0) {
-          cli.io.out(table(installs.map((r) => [r.name, r.result, r.dir])));
-          if (installs.some((r) => r.result === 'skipped-modified')) cli.io.out('modified installs were skipped; use --force to overwrite them\n');
-        } else if (!report.aborted && opts.installs !== false && name === undefined) cli.io.out('no skills installed\n');
       }
-      for (const f of failed) cli.io.err(`${f.name}: ${f.message} (${f.dir})\n`);
+      printInstallResults(cli.io, report, { text: !isJson(cmd), none: !report.aborted && opts.installs !== false && name === undefined });
       if (!report.aborted && name !== undefined && opts.installs !== false && installs.length === 0) throw new CliError(`"${name}" is not installed`);
-      if (installs.some((r) => r.result === 'missing-from-catalog')) {
-        cli.io.err("hint: some installed skills are no longer in the catalog (registry removed, renamed or failing); check 'skillseekr registries'\n");
-      }
       if (report.aborted || errorProblems(report.problems).length > 0) throw new CliError('the library update reported errors (see above)');
       if (failed.length > 0) throw new CliError(`${failed.length} skill(s) failed to update`);
     });

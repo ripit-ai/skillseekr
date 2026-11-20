@@ -182,6 +182,10 @@ export async function setup(ctx: Ctx, opts: SetupOptions): Promise<SetupResult> 
   if (opts.yes || (await opts.confirmUpdate?.()) === true) {
     try {
       update = await runUpdate(ctx, { force: false, installs: true, projectDir: ctx.cwd });
+      if (update.aborted) {
+        const first = update.problems.find((p) => p.level === 'error');
+        errors.push(`library update: ${first?.message ?? 'the update was aborted'}`);
+      }
     } catch (e) {
       errors.push(`library update: ${msg(e)}`);
     }
